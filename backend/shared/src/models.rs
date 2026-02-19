@@ -3,12 +3,16 @@ use serde::{Deserialize, Serialize};
 use sqlx::FromRow;
 use uuid::Uuid;
 
+// ═══════════════════════════════════════════════════════════════════════════
+// EXISTING REGISTRY TYPES
+// ═══════════════════════════════════════════════════════════════════════════
+
 /// Represents a smart contract in the registry
 #[derive(Debug, Clone, Serialize, Deserialize, FromRow)]
 pub struct Contract {
     pub id: Uuid,
-    pub contract_id: String,        // Stellar contract ID (C...)
-    pub wasm_hash: String,           // Hash of the WASM bytecode
+    pub contract_id: String,
+    pub wasm_hash: String,
     pub name: String,
     pub description: Option<String>,
     pub publisher_id: Uuid,
@@ -142,4 +146,217 @@ impl<T> PaginatedResponse<T> {
             total_pages,
         }
     }
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// SECURITY AUDIT TYPES
+// ═══════════════════════════════════════════════════════════════════════════
+
+// ─────────────────────────────────────────────────────────
+// Static checklist definition types
+// ─────────────────────────────────────────────────────────
+
+/// Category of a security checklist item
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Hash)]
+pub enum CheckCategory {
+    InputValidation,
+    StateManagement,
+    AccessControl,
+    Reentrancy,
+    NumericalSafety,
+    AuthenticationAuthorization,
+    DataSerialization,
+    ErrorHandling,
+    StoragePatterns,
+    TokenSafety,
+    EventLogging,
+    Upgradeability,
+    CrossContractCalls,
+    ResourceLimits,
+}
+
+impl std::fmt::Display for CheckCategory {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let s = match self {
+            CheckCategory::InputValidation             => "Input Validation",
+            CheckCategory::StateManagement             => "State Management",
+            CheckCategory::AccessControl               => "Access Control",
+            CheckCategory::Reentrancy                  => "Reentrancy",
+            CheckCategory::NumericalSafety             => "Numerical Safety",
+            CheckCategory::AuthenticationAuthorization => "Authentication & Authorization",
+            CheckCategory::DataSerialization           => "Data Serialization",
+            CheckCategory::ErrorHandling               => "Error Handling",
+            CheckCategory::StoragePatterns             => "Storage Patterns",
+            CheckCategory::TokenSafety                 => "Token Safety",
+            CheckCategory::EventLogging                => "Event Logging",
+            CheckCategory::Upgradeability              => "Upgradeability",
+            CheckCategory::CrossContractCalls          => "Cross-Contract Calls",
+            CheckCategory::ResourceLimits              => "Resource Limits",
+        };
+        write!(f, "{}", s)
+    }
+}
+
+/// Severity of a security finding
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord)]
+pub enum Severity {
+    Info,
+    Low,
+    Medium,
+    High,
+    Critical,
+}
+
+impl std::fmt::Display for Severity {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{:?}", self)
+    }
+}
+
+/// Describes how a checklist item can be detected
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum DetectionMethod {
+    /// Detected purely by pattern-matching source code
+    Automatic { patterns: Vec<String> },
+    /// Must be reviewed by a human auditor
+    Manual,
+    /// Partially automatable — patterns hint but human confirms
+    SemiAutomatic { patterns: Vec<String> },
+}
+
+/// One item in the security audit checklist (static/compile-time data)
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ChecklistItem {
+    pub id: String,
+    pub category: CheckCategory,
+    pub title: String,
+    pub description: String,
+    pub severity: Severity,
+    pub detection: DetectionMethod,
+    pub remediation: String,
+    pub references: Vec<String>,
+}
+
+// ─────────────────────────────────────────────────────────
+// Runtime / database types
+// ─────────────────────────────────────────────────────────
+
+/// Status of a single checklist item within an audit
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Default, sqlx::Type)]
+#[sqlx(type_name = "text", rename_all = "snake_case")]
+pub enum CheckStatus {
+    Passed,
+    Failed,
+    NotApplicable,
+    #[default]
+    Pending,
+}
+
+/// One row in `audit_checks` — per-check status within a single audit
+#[derive(Debug, Clone, Serialize, Deserialize, FromRow)]
+pub struct AuditCheckRow {
+    pub id: Uuid,
+    pub audit_id: Uuid,
+    pub check_id: String,
+    pub status: CheckStatus,
+    pub notes: Option<String>,
+    pub auto_detected: bool,
+    pub evidence: Option<String>,
+    pub updated_at: DateTime<Utc>,
+}
+
+/// One row in `security_audits` — a complete audit session for a contract
+#[derive(Debug, Clone, Serialize, Deserialize, FromRow)]
+pub struct AuditRecord {
+    pub id: Uuid,
+    pub contract_id: Uuid,
+    pub contract_source: Option<String>,
+    pub auditor: String,
+    pub audit_date: DateTime<Utc>,
+    pub overall_score: f64,
+    pub summary: Option<String>,
+    pub created_at: DateTime<Utc>,
+    pub updated_at: DateTime<Utc>,
+}
+
+// ─────────────────────────────────────────────────────────
+// API request / response shapes
+// ─────────────────────────────────────────────────────────
+
+/// POST /contracts/:id/security-audit
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CreateAuditRequest {
+    pub auditor: String,
+    pub source_code: Option<String>,
+}
+
+/// PATCH .../checks/:check_id
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct UpdateCheckRequest {
+    pub status: CheckStatus,
+    pub notes: Option<String>,
+}
+
+/// Full audit response — static checklist metadata merged with live status
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AuditResponse {
+    pub audit: AuditRecord,
+    pub checks: Vec<CheckWithStatus>,
+    pub category_scores: Vec<CategoryScore>,
+    pub auto_detected_count: usize,
+}
+
+/// A checklist item merged with its current audit status
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CheckWithStatus {
+    // static metadata
+    pub id: String,
+    pub category: String,
+    pub title: String,
+    pub description: String,
+    pub severity: String,
+    pub detection_type: String,
+    pub auto_patterns: Vec<String>,
+    pub remediation: String,
+    pub references: Vec<String>,
+    // live audit state
+    pub status: CheckStatus,
+    pub notes: Option<String>,
+    pub auto_detected: bool,
+    pub evidence: Option<String>,
+}
+
+/// Per-category breakdown of the audit score
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CategoryScore {
+    pub category: String,
+    pub score: f64,
+    pub passed: usize,
+    pub total: usize,
+    pub failed_critical: usize,
+    pub failed_high: usize,
+}
+
+/// Lightweight score summary for contract card display
+#[derive(Debug, Clone, Serialize, Deserialize, FromRow)]
+pub struct ContractSecuritySummary {
+    pub audit_id: Uuid,
+    pub audit_date: DateTime<Utc>,
+    pub auditor: String,
+    pub overall_score: f64,
+    pub score_badge: String,
+}
+
+/// Query params for the Markdown export endpoint
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ExportRequest {
+    #[serde(default = "default_true")]
+    pub include_descriptions: bool,
+    #[serde(default)]
+    pub failures_only: bool,
+}
+
+fn default_true() -> bool {
+    true
 }

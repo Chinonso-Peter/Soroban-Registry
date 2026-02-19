@@ -1,6 +1,12 @@
 mod routes;
 mod handlers;
 mod state;
+mod checklist;
+mod detector;
+mod scoring;
+mod audit_handlers;
+mod audit_routes;
+
 
 use anyhow::Result;
 use axum::Router;
@@ -50,6 +56,7 @@ async fn main() -> Result<()> {
         .merge(routes::contract_routes())
         .merge(routes::publisher_routes())
         .merge(routes::health_routes())
+        .merge(audit_routes::security_audit_routes())
         .layer(CorsLayer::permissive())
         .with_state(state);
 
