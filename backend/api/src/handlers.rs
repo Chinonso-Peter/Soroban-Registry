@@ -19,7 +19,7 @@ use crate::{
     state::AppState,
 };
 
-fn db_internal_error(operation: &str, err: sqlx::Error) -> ApiError {
+pub fn db_internal_error(operation: &str, err: sqlx::Error) -> ApiError {
     tracing::error!(operation = operation, error = ?err, "database operation failed");
     ApiError::internal("An unexpected database error occurred")
 }

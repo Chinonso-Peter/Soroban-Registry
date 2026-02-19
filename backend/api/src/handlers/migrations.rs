@@ -11,6 +11,7 @@ use uuid::Uuid;
 
 use crate::error::ApiError;
 use crate::state::AppState;
+use super::db_internal_error;
 
 
 /// Create a new migration
@@ -26,7 +27,8 @@ pub async fn create_migration(
     .bind(&payload.contract_id)
     .bind(&payload.wasm_hash)
     .fetch_one(&state.db)
-    .await?;
+    .await
+    .map_err(|e| db_internal_error("create migration", e))?;
 
     Ok(Json(migration))
 }
@@ -47,7 +49,8 @@ pub async fn update_migration(
     .bind(payload.log_output)
     .bind(id)
     .fetch_one(&state.db)
-    .await?;
+    .await
+    .map_err(|e| db_internal_error("update migration", e))?;
 
     Ok(Json(migration))
 }
@@ -64,7 +67,8 @@ pub async fn get_migrations(
         LIMIT 50"
     )
     .fetch_all(&state.db)
-    .await?;
+    .await
+    .map_err(|e| db_internal_error("get migrations", e))?;
 
     let total = migrations.len() as i64; // In a real app we'd do a count query
     let response = PaginatedResponse::new(migrations, total, 1, 50);
@@ -84,7 +88,8 @@ pub async fn get_migration(
     )
     .bind(id)
     .fetch_optional(&state.db)
-    .await?
+    .await
+    .map_err(|e| db_internal_error("get migration", e))?
     .ok_or(ApiError::not_found("MigrationNotFound", "Migration not found"))?;
 
     Ok(Json(migration))
