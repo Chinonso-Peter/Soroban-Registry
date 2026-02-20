@@ -13,9 +13,12 @@ mod contract_history_routes;
 mod detector;
 mod error;
 mod handlers;
+mod metrics;
+mod metrics_handler;
 mod models;
 mod multisig_handlers;
 mod multisig_routes;
+mod observability;
 mod popularity;
 mod rate_limit;
 mod routes;
@@ -29,8 +32,8 @@ use dotenv::dotenv;
 use sqlx::postgres::PgPoolOptions;
 use std::net::SocketAddr;
 use tower_http::cors::CorsLayer;
-use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
 
+use crate::observability::Observability;
 use crate::rate_limit::RateLimitState;
 use crate::state::AppState;
 
@@ -39,14 +42,7 @@ async fn main() -> Result<()> {
     // Load environment variables
     dotenv().ok();
 
-    // Initialize tracing
-    tracing_subscriber::registry()
-        .with(
-            tracing_subscriber::EnvFilter::try_from_default_env()
-                .unwrap_or_else(|_| "api=debug,tower_http=debug".into()),
-        )
-        .with(tracing_subscriber::fmt::layer())
-        .init();
+    let obs = Observability::init()?;
 
     // Database connection
     let database_url = std::env::var("DATABASE_URL").expect("DATABASE_URL must be set");
@@ -69,7 +65,7 @@ async fn main() -> Result<()> {
     aggregation::spawn_aggregation_task(pool.clone());
 
     // Create app state
-    let state = AppState::new(pool);
+    let state = AppState::new(pool, obs.registry);
     let rate_limit_state = RateLimitState::from_env();
 
     let cors = CorsLayer::new()
@@ -92,6 +88,7 @@ async fn main() -> Result<()> {
         .merge(multisig_routes::multisig_routes())
         .merge(audit_routes::audit_routes())
         .merge(benchmark_routes::benchmark_routes())
+        .merge(routes::observability_routes())
         .fallback(handlers::route_not_found)
         .layer(middleware::from_fn(request_logger))
         .layer(middleware::from_fn_with_state(
