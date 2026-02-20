@@ -965,6 +965,8 @@ impl From<ContractConfig> for ContractConfigResponse {
             created_by: config.created_by,
         }
     }
+}
+
 // ═══════════════════════════════════════════════════════════════════════════
 // DATA RESIDENCY CONTROLS  (issue #100)
 // ═══════════════════════════════════════════════════════════════════════════
