@@ -43,6 +43,7 @@ mod template_routes;
 mod trust;
 mod health_monitor;
 mod migration_cli;
+mod validation;
 
 use anyhow::Result;
 use axum::http::{header, HeaderValue, Method};
