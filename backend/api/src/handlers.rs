@@ -224,7 +224,7 @@ pub async fn get_contract(
         })?;
 
     let active_deployment: Option<ContractDeployment> = sqlx::query_as(
-        "SELECT * FROM contract_deployments 
+        "SELECT * FROM contract_deployments
          WHERE contract_id = $1 AND status = 'active'",
     )
     .bind(contract.id)
@@ -589,8 +589,8 @@ pub async fn deploy_green(
     let deployment: ContractDeployment = sqlx::query_as(
         "INSERT INTO contract_deployments (contract_id, environment, status, wasm_hash)
          VALUES ($1, 'green', 'testing', $2)
-         ON CONFLICT (contract_id, environment) 
-         DO UPDATE SET wasm_hash = EXCLUDED.wasm_hash, status = 'testing', 
+         ON CONFLICT (contract_id, environment)
+         DO UPDATE SET wasm_hash = EXCLUDED.wasm_hash, status = 'testing',
                        deployed_at = NOW(), error_message = NULL
          RETURNING *",
     )
@@ -627,7 +627,7 @@ pub async fn switch_deployment(
     })?;
 
     let active_deployment: Option<ContractDeployment> = sqlx::query_as(
-        "SELECT * FROM contract_deployments 
+        "SELECT * FROM contract_deployments
          WHERE contract_id = $1 AND status = 'active'",
     )
     .bind(contract.id)
@@ -646,7 +646,7 @@ pub async fn switch_deployment(
     };
 
     let green_deployment: Option<ContractDeployment> = sqlx::query_as(
-        "SELECT * FROM contract_deployments 
+        "SELECT * FROM contract_deployments
          WHERE contract_id = $1 AND environment = 'green'",
     )
     .bind(contract.id)
@@ -683,8 +683,8 @@ pub async fn switch_deployment(
     }
 
     sqlx::query(
-        "UPDATE contract_deployments 
-         SET status = 'active', activated_at = NOW() 
+        "UPDATE contract_deployments
+         SET status = 'active', activated_at = NOW()
          WHERE contract_id = $1 AND environment = $2",
     )
     .bind(contract.id)
@@ -738,7 +738,7 @@ pub async fn rollback_deployment(
     })?;
 
     let active_deployment: Option<ContractDeployment> = sqlx::query_as(
-        "SELECT * FROM contract_deployments 
+        "SELECT * FROM contract_deployments
          WHERE contract_id = $1 AND status = 'active'",
     )
     .bind(contract.id)
@@ -757,7 +757,7 @@ pub async fn rollback_deployment(
     };
 
     let target_deployment: Option<ContractDeployment> = sqlx::query_as(
-        "SELECT * FROM contract_deployments 
+        "SELECT * FROM contract_deployments
          WHERE contract_id = $1 AND environment = $2",
     )
     .bind(contract.id)
@@ -782,8 +782,8 @@ pub async fn rollback_deployment(
     }
 
     sqlx::query(
-        "UPDATE contract_deployments 
-         SET status = 'active', activated_at = NOW() 
+        "UPDATE contract_deployments
+         SET status = 'active', activated_at = NOW()
          WHERE contract_id = $1 AND environment = $2",
     )
     .bind(contract.id)
@@ -841,8 +841,8 @@ pub async fn report_health_check(
 
     if req.passed {
         sqlx::query(
-            "UPDATE contract_deployments 
-             SET health_checks_passed = health_checks_passed + 1, 
+            "UPDATE contract_deployments
+             SET health_checks_passed = health_checks_passed + 1,
                  last_health_check_at = NOW()
              WHERE contract_id = $1 AND environment = $2",
         )
@@ -853,8 +853,8 @@ pub async fn report_health_check(
         .map_err(|err| db_internal_error("update health check passed", err))?;
     } else {
         sqlx::query(
-            "UPDATE contract_deployments 
-             SET health_checks_failed = health_checks_failed + 1, 
+            "UPDATE contract_deployments
+             SET health_checks_failed = health_checks_failed + 1,
                  status = CASE WHEN health_checks_failed + 1 >= 3 THEN 'failed' ELSE status END,
                  last_health_check_at = NOW()
              WHERE contract_id = $1 AND environment = $2",
@@ -890,8 +890,8 @@ pub async fn get_deployment_status(
         })?;
 
     let deployments: Vec<ContractDeployment> = sqlx::query_as(
-        "SELECT * FROM contract_deployments 
-         WHERE contract_id = $1 
+        "SELECT * FROM contract_deployments
+         WHERE contract_id = $1
          ORDER BY deployed_at DESC",
     )
     .bind(contract.id)

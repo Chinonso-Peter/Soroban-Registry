@@ -216,3 +216,32 @@ pub struct ExportRequest {
 fn default_true() -> bool {
     true
 }
+
+
+
+// --- Reviews & Ratings Models ---
+#[derive(Debug, Deserialize)]
+pub struct CreateReviewRequest {
+    pub version: String,
+    pub rating: f32,
+    pub review_text: Option<String>,
+}
+
+#[derive(Debug, Serialize, FromRow)]
+pub struct ReviewResponse {
+    pub id: i32,
+    pub contract_id: Uuid,
+    pub user_id: Uuid,
+    pub version: String,
+    pub rating: f32,
+    pub review_text: Option<String>,
+    pub helpful_count: i32,
+    pub is_flagged: bool,
+    pub created_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct ContractRatingStats {
+    pub average_rating: f64,
+    pub total_reviews: i64,
+}
