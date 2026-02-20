@@ -5,6 +5,8 @@ mod audit_routes;
 mod benchmark_engine;
 mod benchmark_handlers;
 mod benchmark_routes;
+mod cache;
+mod cache_benchmark;
 mod checklist;
 mod contract_history_handlers;
 mod contract_history_routes;
@@ -78,9 +80,12 @@ async fn main() -> Result<()> {
         .merge(routes::publisher_routes())
         .merge(routes::health_routes())
         .merge(routes::migration_routes())
-        .merge(audit_routes::security_audit_routes())
+        .merge(routes::canary_routes())
+        .merge(routes::ab_test_routes())
+        .merge(routes::performance_routes())
+        .merge(multisig_routes::multisig_routes())
+        .merge(audit_routes::audit_routes())
         .merge(benchmark_routes::benchmark_routes())
-        .merge(contract_history_routes::contract_history_routes())
         .fallback(handlers::route_not_found)
         .layer(middleware::from_fn(request_logger))
         .layer(middleware::from_fn_with_state(
