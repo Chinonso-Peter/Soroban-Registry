@@ -4,8 +4,11 @@ use colored::Colorize;
 use serde_json::json;
 use shared::{extract_abi, generate_markdown};
 use std::fs;
+use std::path::Path;
 
 use crate::patch::{PatchManager, Severity};
+use crate::profiler;
+use crate::test_framework;
 
 pub async fn search(
     api_url: &str,
@@ -106,7 +109,7 @@ pub async fn info(api_url: &str, contract_id: &str, network: Network) -> Result<
         "Network".bold(),
         contract["network"].as_str().unwrap_or("").bright_blue()
     );
-
+    
     let is_verified = contract["is_verified"].as_bool().unwrap_or(false);
     println!(
         "{}: {}",
@@ -253,6 +256,7 @@ pub async fn list(api_url: &str, limit: usize, network: Network) -> Result<()> {
 
     Ok(())
 }
+
 
 pub async fn migrate(
     api_url: &str,
@@ -622,3 +626,263 @@ pub fn doc(contract_path: &str, output_dir: &str) -> Result<()> {
     println!("{} Documentation generated at {:?}", "✓".green(), out_path);
     Ok(())
 }
+
+pub async fn profile(
+    contract_path: &str,
+    method: Option<&str>,
+    output: Option<&str>,
+    flamegraph: Option<&str>,
+    compare: Option<&str>,
+    show_recommendations: bool,
+) -> Result<()> {
+    let path = Path::new(contract_path);
+    if !path.exists() {
+        anyhow::bail!("Contract file not found: {}", contract_path);
+    }
+
+    println!("\n{}", "Profiling contract...".bold().cyan());
+    println!("{}", "=".repeat(80).cyan());
+
+    let mut profiler = profiler::Profiler::new();
+    profiler::simulate_execution(path, method, &mut profiler)?;
+    let profile_data = profiler.finish(contract_path.to_string(), method.map(|s| s.to_string()));
+
+    println!("\n{}", "Profile Results:".bold().green());
+    println!("Total Duration: {:.2}ms", profile_data.total_duration.as_secs_f64() * 1000.0);
+    println!("Overhead: {:.2}%", profile_data.overhead_percent);
+    println!("Functions Profiled: {}", profile_data.functions.len());
+
+    let mut sorted_functions: Vec<_> = profile_data.functions.values().collect();
+    sorted_functions.sort_by(|a, b| b.total_time.cmp(&a.total_time));
+
+    println!("\n{}", "Top Functions:".bold());
+    for (i, func) in sorted_functions.iter().take(10).enumerate() {
+        println!(
+            "{}. {} - {:.2}ms ({} calls, avg: {:.2}μs)",
+            i + 1,
+            func.name.bold(),
+            func.total_time.as_secs_f64() * 1000.0,
+            func.call_count,
+            func.avg_time.as_secs_f64() * 1_000_000.0
+        );
+    }
+
+    if let Some(output_path) = output {
+        let json = serde_json::to_string_pretty(&profile_data)?;
+        std::fs::write(output_path, json)
+            .with_context(|| format!("Failed to write profile to: {}", output_path))?;
+        println!("\n{} Profile exported to: {}", "✓".green(), output_path);
+    }
+
+    if let Some(flame_path) = flamegraph {
+        profiler::generate_flame_graph(&profile_data, Path::new(flame_path))?;
+        println!("{} Flame graph generated: {}", "✓".green(), flame_path);
+    }
+
+    if let Some(baseline_path) = compare {
+        let baseline_json = std::fs::read_to_string(baseline_path)
+            .with_context(|| format!("Failed to read baseline: {}", baseline_path))?;
+        let baseline: profiler::ProfileData = serde_json::from_str(&baseline_json)?;
+
+        let comparisons = profiler::compare_profiles(&baseline, &profile_data);
+
+        println!("\n{}", "Comparison Results:".bold().yellow());
+        for comp in comparisons.iter().take(10) {
+            let sign = if comp.time_diff_ns > 0 { "+" } else { "" };
+            println!(
+                "{}: {} ({}{:.2}%, {:.2}ms → {:.2}ms)",
+                comp.function.bold(),
+                comp.status,
+                sign,
+                comp.time_diff_percent,
+                comp.baseline_time.as_secs_f64() * 1000.0,
+                comp.current_time.as_secs_f64() * 1000.0
+            );
+        }
+    }
+
+    if show_recommendations {
+        let recommendations = profiler::generate_recommendations(&profile_data);
+        println!("\n{}", "Recommendations:".bold().magenta());
+        for (i, rec) in recommendations.iter().enumerate() {
+            println!("{}. {}", i + 1, rec);
+        }
+    }
+
+pub async fn deps_list(api_url: &str, contract_id: &str) -> Result<()> {
+    let client = reqwest::Client::new();
+    let url = format!("{}/api/contracts/{}/dependencies", api_url, contract_id);
+
+    let response = client
+        .get(&url)
+        .send()
+        .await
+        .context("Failed to fetch contract dependencies")?;
+
+    if !response.status().is_success() {
+        if response.status() == reqwest::StatusCode::NOT_FOUND {
+             anyhow::bail!("Contract not found");
+        }
+        anyhow::bail!("Failed to fetch dependencies: {}", response.status());
+    }
+
+    let items: serde_json::Value = response.json().await?;
+    let tree = items.as_array().context("Invalid response format")?;
+
+    println!("\n{}", "Dependency Tree:".bold().cyan());
+    println!("{}", "=".repeat(80).cyan());
+
+    if tree.is_empty() {
+        println!("{}", "No dependencies found.".yellow());
+        return Ok(());
+    }
+
+    fn print_tree(nodes: &[serde_json::Value], prefix: &str, is_last: bool) {
+        for (i, node) in nodes.iter().enumerate() {
+            let name = node["name"].as_str().unwrap_or("Unknown");
+            let constraint = node["constraint_to_parent"].as_str().unwrap_or("*");
+            let contract_id = node["contract_id"].as_str().unwrap_or("");
+            
+            let is_node_last = i == nodes.len() - 1;
+            let marker = if is_node_last { "└──" } else { "├──" };
+            
+            println!(
+                "{}{} {} ({}) {}", 
+                prefix, 
+                marker.bright_black(), 
+                name.bold(), 
+                constraint.cyan(),
+                if contract_id == "unknown" { "[Unresolved]".red() } else { "".normal() }
+            );
+
+            if let Some(children) = node["dependencies"].as_array() {
+                if !children.is_empty() {
+                     let new_prefix = format!("{}{}", prefix, if is_node_last { "    " } else { "│   " });
+                     print_tree(children, &new_prefix, true);
+                }
+            }
+        }
+    }
+
+    print_tree(tree, "", true);
+
+
+    println!("\n{}", "=".repeat(80).cyan());
+    println!();
+
+    Ok(())
+}
+
+
+pub async fn run_tests(
+    test_file: &str,
+    contract_path: Option<&str>,
+    junit_output: Option<&str>,
+    show_coverage: bool,
+    verbose: bool,
+) -> Result<()> {
+    let test_path = Path::new(test_file);
+    if !test_path.exists() {
+        anyhow::bail!("Test file not found: {}", test_file);
+    }
+
+    let contract_dir = contract_path.unwrap_or(".");
+    let mut runner = test_framework::TestRunner::new(contract_dir)?;
+
+    println!("\n{}", "Running Integration Tests...".bold().cyan());
+    println!("{}", "=".repeat(80).cyan());
+
+    let scenario = test_framework::load_test_scenario(test_path)?;
+    
+    if verbose {
+        println!("\n{}: {}", "Scenario".bold(), scenario.name);
+        if let Some(desc) = &scenario.description {
+            println!("{}: {}", "Description".bold(), desc);
+        }
+        println!("{}: {}", "Steps".bold(), scenario.steps.len());
+    }
+
+    let start_time = std::time::Instant::now();
+    let result = runner.run_scenario(scenario).await?;
+    let total_time = start_time.elapsed();
+
+    println!("\n{}", "Test Results:".bold().green());
+    println!("{}", "=".repeat(80).cyan());
+
+    let status_icon = if result.passed { "✓" } else { "✗" };
+    
+    println!(
+        "\n{} {} {} ({:.2}ms)",
+        status_icon,
+        "Scenario:".bold(),
+        result.scenario.bold(),
+        result.duration.as_secs_f64() * 1000.0
+    );
+
+    if !result.passed {
+        if let Some(ref err) = result.error {
+            println!("{} {}", "Error:".bold().red(), err);
+        }
+    }
+
+    println!("\n{}", "Step Results:".bold());
+    for (i, step) in result.steps.iter().enumerate() {
+        let step_icon = if step.passed { "✓" } else { "✗" };
+        
+        println!(
+            "  {}. {} {} ({:.2}ms)",
+            i + 1,
+            step_icon,
+            step.step_name.bold(),
+            step.duration.as_secs_f64() * 1000.0
+        );
+
+        if verbose {
+            println!(
+                "     Assertions: {}/{} passed",
+                step.assertions_passed,
+                step.assertions_passed + step.assertions_failed
+            );
+        }
+
+        if let Some(ref err) = step.error {
+            println!("     {}", err.red());
+        }
+    }
+
+    if show_coverage {
+        println!("\n{}", "Coverage Report:".bold().magenta());
+        println!("  Contracts Tested: {}", result.coverage.contracts_tested);
+        println!("  Methods Tested: {}/{}", 
+            result.coverage.methods_tested, 
+            result.coverage.total_methods
+        );
+        println!("  Coverage: {:.2}%", result.coverage.coverage_percent);
+        
+        if result.coverage.coverage_percent < 80.0 {
+            println!("  {} Low coverage detected!", "⚠".yellow());
+        }
+    }
+
+    if let Some(junit_path) = junit_output {
+        test_framework::generate_junit_xml(&[result], Path::new(junit_path))?;
+        println!("\n{} JUnit XML report exported to: {}", "✓".green(), junit_path);
+    }
+
+    if total_time.as_secs() > 5 {
+        println!("\n{} Test execution took {:.2}s (target: <5s)", 
+            "⚠".yellow(), 
+            total_time.as_secs_f64()
+        );
+    }
+
+    println!("\n{}", "=".repeat(80).cyan());
+    println!();
+
+    if !result.passed {
+        anyhow::bail!("Tests failed");
+    }
+
+    Ok(())
+}
+

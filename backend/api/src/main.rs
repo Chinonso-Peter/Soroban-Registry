@@ -8,16 +8,19 @@ mod benchmark_routes;
 mod cache;
 mod cache_benchmark;
 mod checklist;
+mod contract_history_handlers;
+mod contract_history_routes;
 mod detector;
 mod error;
 mod handlers;
+mod models;
 mod multisig_handlers;
 mod multisig_routes;
-mod models;
+mod popularity;
 mod rate_limit;
 mod routes;
-mod scoring;
 mod state;
+mod health_monitor;
 
 use anyhow::Result;
 use axum::http::{header, HeaderValue, Method};
@@ -60,6 +63,8 @@ async fn main() -> Result<()> {
 
     tracing::info!("Database connected and migrations applied");
 
+    // Spawn background popularity scoring job (runs hourly)
+    popularity::spawn_popularity_task(pool.clone());
     // Spawn the hourly analytics aggregation background task
     aggregation::spawn_aggregation_task(pool.clone());
 
@@ -81,6 +86,9 @@ async fn main() -> Result<()> {
         .merge(routes::publisher_routes())
         .merge(routes::health_routes())
         .merge(routes::migration_routes())
+        .merge(routes::canary_routes())
+        .merge(routes::ab_test_routes())
+        .merge(routes::performance_routes())
         .merge(multisig_routes::multisig_routes())
         .merge(audit_routes::audit_routes())
         .merge(benchmark_routes::benchmark_routes())
@@ -92,7 +100,10 @@ async fn main() -> Result<()> {
         ))
         .layer(CorsLayer::permissive())
         .layer(cors)
-        .with_state(state);
+        .with_state(state.clone());
+
+    // Spawn health monitor task
+    tokio::spawn(health_monitor::run_health_monitor(state));
 
     // Start server
     let addr = SocketAddr::from(([0, 0, 0, 0], 3001));

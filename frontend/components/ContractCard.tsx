@@ -1,6 +1,8 @@
 import { Contract } from '@/lib/api';
 import { CheckCircle2, Clock, ExternalLink, Tag } from 'lucide-react';
 import Link from 'next/link';
+import React from 'react';
+import HealthWidget from './HealthWidget';
 
 interface ContractCardProps {
   contract: Contract;
@@ -67,6 +69,11 @@ export default function ContractCard({ contract }: ContractCardProps) {
               )}
             </div>
           )}
+
+          {/* Health Widget */}
+          <div onClick={(e: React.MouseEvent) => e.preventDefault()}>
+            <HealthWidget contract={contract} />
+          </div>
 
           {/* Footer */}
           <div className="flex items-center justify-between text-xs text-gray-500 dark:text-gray-400">
