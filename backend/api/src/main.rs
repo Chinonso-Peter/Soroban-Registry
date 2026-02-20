@@ -25,6 +25,8 @@ mod contract_history_handlers;
 mod contract_history_routes;
 mod detector;
 mod error;
+mod event_handlers;
+mod event_routes;
 mod handlers;
 mod metrics;
 mod observability;
@@ -177,6 +179,9 @@ pub enum Commands {
     popularity::spawn_popularity_task(pool.clone());
     // Spawn the hourly analytics aggregation background task
     aggregation::spawn_aggregation_task(pool.clone());
+    
+    // Spawn maintenance scheduler
+    maintenance_scheduler::spawn_maintenance_scheduler(pool.clone());
 
         /// Verbose output
         #[arg(long, short)]
@@ -870,6 +875,10 @@ async fn main() -> Result<()> {
         .merge(regression_routes::regression_routes())
         .fallback(handlers::route_not_found)
         .layer(middleware::from_fn(metrics_middleware))
+        .layer(middleware::from_fn_with_state(
+            state.clone(),
+            maintenance_middleware::maintenance_check,
+        ))
         .layer(middleware::from_fn_with_state(
             rate_limit_state,
             rate_limit::rate_limit_middleware,

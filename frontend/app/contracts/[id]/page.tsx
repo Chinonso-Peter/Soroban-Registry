@@ -70,6 +70,11 @@ function ContractDetailsContent() {
         Back to contracts
       </Link>
 
+      {/* Maintenance Banner */}
+      {maintenanceStatus?.is_maintenance && maintenanceStatus.current_window && (
+        <MaintenanceBanner window={maintenanceStatus.current_window} />
+      )}
+
       {/* Header */}
       <div className="mb-12">
         <div className="flex items-start justify-between mb-4">

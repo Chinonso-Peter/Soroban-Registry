@@ -20,6 +20,7 @@ export interface Contract {
   downloads?: number;
   created_at: string;
   updated_at: string;
+  is_maintenance?: boolean;
 }
 
 export interface ContractHealth {
