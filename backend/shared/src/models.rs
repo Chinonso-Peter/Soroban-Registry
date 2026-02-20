@@ -143,3 +143,25 @@ impl<T> PaginatedResponse<T> {
         }
     }
 }
+
+/// Health status of a contract
+#[derive(Debug, Clone, Serialize, Deserialize, sqlx::Type, PartialEq)]
+#[sqlx(type_name = "text", rename_all = "lowercase")]
+pub enum HealthStatus {
+    Healthy,
+    Warning,
+    Critical,
+}
+
+/// Contract health metrics
+#[derive(Debug, Clone, Serialize, Deserialize, FromRow)]
+pub struct ContractHealth {
+    pub contract_id: Uuid,
+    pub status: HealthStatus,
+    pub last_activity: DateTime<Utc>,
+    pub security_score: i32,
+    pub audit_date: Option<DateTime<Utc>>,
+    pub total_score: i32,
+    pub recommendations: Vec<String>,
+    pub updated_at: DateTime<Utc>,
+}

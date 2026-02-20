@@ -1,4 +1,5 @@
 use axum::{
+    http::StatusCode,
     extract::{
         rejection::{JsonRejection, QueryRejection},
         Path, Query, State,
@@ -6,7 +7,7 @@ use axum::{
     Json,
 };
 use shared::{
-    Contract, ContractSearchParams, ContractVersion, PaginatedResponse, PublishRequest, Publisher,
+    Contract, ContractHealth, ContractSearchParams, ContractVersion, PaginatedResponse, PublishRequest, Publisher,
     VerifyRequest,
 };
 use uuid::Uuid;
@@ -328,6 +329,47 @@ pub async fn get_publisher_contracts(
     .map_err(|err| db_internal_error("get publisher contracts", err))?;
 
     Ok(Json(contracts))
+}
+
+
+/// Get contract health
+pub async fn get_contract_health(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+) -> ApiResult<Json<ContractHealth>> {
+    let contract_uuid = Uuid::parse_str(&id).map_err(|_| {
+        ApiError::bad_request(
+            "InvalidContractId",
+            format!("Invalid contract ID format: {}", id),
+        )
+    })?;
+
+    // Check if contract exists first
+    let _contract: Contract = sqlx::query_as("SELECT * FROM contracts WHERE id = $1")
+        .bind(contract_uuid)
+        .fetch_one(&state.db)
+        .await
+        .map_err(|match_err| match match_err {
+            sqlx::Error::RowNotFound => ApiError::not_found(
+                "ContractNotFound",
+                format!("No contract found with ID: {}", id),
+            ),
+            _ => db_internal_error("check contract existence", match_err),
+        })?;
+
+    let health: ContractHealth = sqlx::query_as("SELECT * FROM contract_health WHERE contract_id = $1")
+        .bind(contract_uuid)
+        .fetch_one(&state.db)
+        .await
+        .map_err(|err| match err {
+            sqlx::Error::RowNotFound => ApiError::not_found(
+                "HealthNotFound",
+                format!("Health data not found for contract: {}", id),
+            ),
+            _ => db_internal_error("get contract health", err),
+        })?;
+
+    Ok(Json(health))
 }
 
 /// Fallback endpoint for unknown routes
