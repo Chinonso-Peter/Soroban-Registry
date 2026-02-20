@@ -1,24 +1,13 @@
-mod audit_handlers;
-mod audit_routes;
-mod benchmark_engine;
-mod benchmark_handlers;
-mod benchmark_routes;
-mod checklist;
-mod detector;
+mod error;
 mod handlers;
+mod popularity;
+mod rate_limit;
 mod routes;
-mod scoring;
 mod state;
-mod checklist;
-mod detector;
-mod scoring;
-mod audit_handlers;
-mod audit_routes;
-
 
 use anyhow::Result;
 use axum::http::{header, HeaderValue, Method};
-use axum::{Router, middleware};
+use axum::{middleware, Router};
 use dotenv::dotenv;
 use sqlx::postgres::PgPoolOptions;
 use std::net::SocketAddr;
@@ -56,6 +45,9 @@ async fn main() -> Result<()> {
         .await?;
 
     tracing::info!("Database connected and migrations applied");
+
+    // Spawn background popularity scoring job (runs hourly)
+    popularity::spawn_popularity_task(pool.clone());
 
     // Create app state
     let state = AppState::new(pool);

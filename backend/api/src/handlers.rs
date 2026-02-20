@@ -12,7 +12,8 @@ use axum::{
 use shared::{
     Contract, ContractDeployment, ContractSearchParams, ContractVersion, DeployGreenRequest,
     DeploymentEnvironment, DeploymentStatus, DeploymentSwitch, HealthCheckRequest,
-    PaginatedResponse, PublishRequest, Publisher, SwitchDeploymentRequest, VerifyRequest,
+    PaginatedResponse, PublishRequest, Publisher, SwitchDeploymentRequest, TrendingContract,
+    TrendingParams, VerifyRequest,
 };
 use uuid::Uuid;
 
@@ -27,19 +28,23 @@ pub fn db_internal_error(operation: &str, err: sqlx::Error) -> ApiError {
 }
 
 fn map_json_rejection(err: JsonRejection) -> ApiError {
-    ApiError::bad_request("InvalidRequest", format!("Invalid JSON payload: {}", err.body_text()))
+    ApiError::bad_request(
+        "InvalidRequest",
+        format!("Invalid JSON payload: {}", err.body_text()),
+    )
 }
 
 fn map_query_rejection(err: QueryRejection) -> ApiError {
-    ApiError::bad_request("InvalidQuery", format!("Invalid query parameters: {}", err.body_text()))
+    ApiError::bad_request(
+        "InvalidQuery",
+        format!("Invalid query parameters: {}", err.body_text()),
+    )
 }
 
 /// Health check — probes DB connectivity and reports uptime.
 /// Returns 200 when everything is reachable, 503 when the database
 /// connection pool cannot satisfy a trivial query.
-pub async fn health_check(
-    State(state): State<AppState>,
-) -> (StatusCode, Json<serde_json::Value>) {
+pub async fn health_check(State(state): State<AppState>) -> (StatusCode, Json<serde_json::Value>) {
     let uptime = state.started_at.elapsed().as_secs();
     let now = chrono::Utc::now().to_rfc3339();
 
@@ -63,7 +68,10 @@ pub async fn health_check(
             })),
         )
     } else {
-        tracing::warn!(uptime_secs = uptime, "health check degraded — db unreachable");
+        tracing::warn!(
+            uptime_secs = uptime,
+            "health check degraded — db unreachable"
+        );
 
         (
             StatusCode::SERVICE_UNAVAILABLE,
@@ -78,9 +86,7 @@ pub async fn health_check(
 }
 
 /// Get registry statistics
-pub async fn get_stats(
-    State(state): State<AppState>,
-) -> ApiResult<Json<serde_json::Value>> {
+pub async fn get_stats(State(state): State<AppState>) -> ApiResult<Json<serde_json::Value>> {
     let total_contracts: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM contracts")
         .fetch_one(&state.db)
         .await
@@ -90,7 +96,7 @@ pub async fn get_stats(
         sqlx::query_scalar("SELECT COUNT(*) FROM contracts WHERE is_verified = true")
             .fetch_one(&state.db)
             .await
-            .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+            .map_err(|err| db_internal_error("count verified contracts", err))?;
 
     let total_publishers: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM publishers")
         .fetch_one(&state.db)
@@ -153,21 +159,15 @@ pub async fn list_contracts(
 
     query.push_str(&format!(
         " ORDER BY created_at DESC LIMIT {} OFFSET {}",
-        page_size, offset
+        limit, offset
     ));
 
-    let contracts: Vec<Contract> = match sqlx::query_as(&query)
-        .fetch_all(&state.db)
-        .await
-    {
+    let contracts: Vec<Contract> = match sqlx::query_as(&query).fetch_all(&state.db).await {
         Ok(rows) => rows,
         Err(err) => return db_internal_error("list contracts", err).into_response(),
     };
 
-    let total: i64 = match sqlx::query_scalar(&count_query)
-        .fetch_one(&state.db)
-        .await
-    {
+    let total: i64 = match sqlx::query_scalar(&count_query).fetch_one(&state.db).await {
         Ok(n) => n,
         Err(err) => return db_internal_error("count filtered contracts", err).into_response(),
     };
@@ -193,15 +193,21 @@ pub async fn list_contracts(
         ));
     }
 
-    Ok(Json(PaginatedResponse::new(
-        contracts, total, page, page_size,
-    )))
+    let mut response = (StatusCode::OK, Json(paginated)).into_response();
+
+    if !links.is_empty() {
+        if let Ok(value) = axum::http::HeaderValue::from_str(&links.join(", ")) {
+            response.headers_mut().insert("link", value);
+        }
+    }
+
+    response
 }
 
 pub async fn get_contract(
     State(state): State<AppState>,
     Path(id): Path<Uuid>,
-) -> Result<Json<Contract>, StatusCode> {
+) -> ApiResult<Json<Contract>> {
     let contract: Contract = sqlx::query_as("SELECT * FROM contracts WHERE id = $1")
         .bind(id)
         .fetch_one(&state.db)
@@ -228,7 +234,7 @@ pub async fn get_contract(
         contract_with_deployment.wasm_hash = deployment.wasm_hash;
         Ok(Json(contract_with_deployment))
     } else {
-    Ok(Json(contract))
+        Ok(Json(contract))
     }
 }
 
@@ -237,11 +243,12 @@ pub async fn get_contract_abi(
     State(state): State<AppState>,
     Path(id): Path<Uuid>,
 ) -> Result<Json<serde_json::Value>, StatusCode> {
-    let abi: Option<serde_json::Value> = sqlx::query_scalar("SELECT abi FROM contracts WHERE id = $1")
-        .bind(id)
-        .fetch_one(&state.db)
-        .await
-        .map_err(|_| StatusCode::NOT_FOUND)?;
+    let abi: Option<serde_json::Value> =
+        sqlx::query_scalar("SELECT abi FROM contracts WHERE id = $1")
+            .bind(id)
+            .fetch_one(&state.db)
+            .await
+            .map_err(|_| StatusCode::NOT_FOUND)?;
 
     abi.map(Json).ok_or(StatusCode::NOT_FOUND)
 }
@@ -251,7 +258,7 @@ pub async fn get_contract_versions(
     State(state): State<AppState>,
     Path(id): Path<String>,
 ) -> ApiResult<Json<Vec<ContractVersion>>> {
-    let contract_uuid = Uuid::parse_str(&id).map_err(|_| {
+    let _contract_uuid = Uuid::parse_str(&id).map_err(|_| {
         ApiError::bad_request(
             "InvalidContractId",
             format!("Invalid contract ID format: {}", id),
@@ -264,7 +271,7 @@ pub async fn get_contract_versions(
     .bind(id)
     .fetch_all(&state.db)
     .await
-    .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    .map_err(|err| db_internal_error("list versions", err))?;
 
     Ok(Json(versions))
 }
@@ -285,7 +292,7 @@ pub async fn publish_contract(
     .bind(&req.publisher_address)
     .fetch_one(&state.db)
     .await
-    .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    .map_err(|err| db_internal_error("upsert publisher", err))?;
 
     // TODO: Fetch WASM hash from Stellar network
     let wasm_hash = "placeholder_hash".to_string();
@@ -354,7 +361,7 @@ pub async fn create_publisher(
     .bind(&publisher.website)
     .fetch_one(&state.db)
     .await
-    .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    .map_err(|err| db_internal_error("create publisher", err))?;
 
     Ok(Json(created))
 }
@@ -363,7 +370,7 @@ pub async fn create_publisher(
 pub async fn get_publisher(
     State(state): State<AppState>,
     Path(id): Path<Uuid>,
-) -> Result<Json<Publisher>, StatusCode> {
+) -> ApiResult<Json<Publisher>> {
     let publisher: Publisher = sqlx::query_as("SELECT * FROM publishers WHERE id = $1")
         .bind(id)
         .fetch_one(&state.db)
@@ -383,13 +390,13 @@ pub async fn get_publisher(
 pub async fn get_publisher_contracts(
     State(state): State<AppState>,
     Path(id): Path<Uuid>,
-) -> Result<Json<Vec<Contract>>, StatusCode> {
+) -> ApiResult<Json<Vec<Contract>>> {
     let contracts: Vec<Contract> =
         sqlx::query_as("SELECT * FROM contracts WHERE publisher_id = $1 ORDER BY created_at DESC")
             .bind(id)
             .fetch_all(&state.db)
             .await
-            .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+            .map_err(|err| db_internal_error("list publisher contracts", err))?;
 
     Ok(Json(contracts))
 }
@@ -448,9 +455,11 @@ pub async fn switch_deployment(
             _ => db_internal_error("get contract for switch", err),
         })?;
 
-    let mut tx = state.db.begin().await.map_err(|err| {
-        db_internal_error("begin transaction for switch", err)
-    })?;
+    let mut tx = state
+        .db
+        .begin()
+        .await
+        .map_err(|err| db_internal_error("begin transaction for switch", err))?;
 
     let active_deployment: Option<ContractDeployment> = sqlx::query_as(
         "SELECT * FROM contract_deployments 
@@ -531,9 +540,9 @@ pub async fn switch_deployment(
     .await
     .map_err(|err| db_internal_error("record deployment switch", err))?;
 
-    tx.commit().await.map_err(|err| {
-        db_internal_error("commit deployment switch", err)
-    })?;
+    tx.commit()
+        .await
+        .map_err(|err| db_internal_error("commit deployment switch", err))?;
 
     Ok(Json(serde_json::json!({
         "success": true,
@@ -559,9 +568,11 @@ pub async fn rollback_deployment(
             _ => db_internal_error("get contract for rollback", err),
         })?;
 
-    let mut tx = state.db.begin().await.map_err(|err| {
-        db_internal_error("begin transaction for rollback", err)
-    })?;
+    let mut tx = state
+        .db
+        .begin()
+        .await
+        .map_err(|err| db_internal_error("begin transaction for rollback", err))?;
 
     let active_deployment: Option<ContractDeployment> = sqlx::query_as(
         "SELECT * FROM contract_deployments 
@@ -630,9 +641,9 @@ pub async fn rollback_deployment(
     .await
     .map_err(|err| db_internal_error("record rollback switch", err))?;
 
-    tx.commit().await.map_err(|err| {
-        db_internal_error("commit rollback", err)
-    })?;
+    tx.commit()
+        .await
+        .map_err(|err| db_internal_error("commit rollback", err))?;
 
     Ok(Json(serde_json::json!({
         "success": true,
@@ -725,9 +736,15 @@ pub async fn get_deployment_status(
     .await
     .map_err(|err| db_internal_error("get deployments", err))?;
 
-    let active = deployments.iter().find(|d| matches!(d.status, DeploymentStatus::Active));
-    let blue = deployments.iter().find(|d| matches!(d.environment, DeploymentEnvironment::Blue));
-    let green = deployments.iter().find(|d| matches!(d.environment, DeploymentEnvironment::Green));
+    let active = deployments
+        .iter()
+        .find(|d| matches!(d.status, DeploymentStatus::Active));
+    let blue = deployments
+        .iter()
+        .find(|d| matches!(d.environment, DeploymentEnvironment::Blue));
+    let green = deployments
+        .iter()
+        .find(|d| matches!(d.environment, DeploymentEnvironment::Green));
 
     Ok(Json(serde_json::json!({
         "contract_id": contract_id,
@@ -735,6 +752,67 @@ pub async fn get_deployment_status(
         "blue": blue,
         "green": green
     })))
+}
+
+/// Get trending contracts ranked by popularity score
+pub async fn get_trending_contracts(
+    State(state): State<AppState>,
+    params: Result<Query<TrendingParams>, QueryRejection>,
+) -> ApiResult<Json<Vec<TrendingContract>>> {
+    let Query(params) = params.map_err(map_query_rejection)?;
+
+    let limit = params.limit.unwrap_or(10).min(50).max(1);
+    let timeframe = params.timeframe.as_deref().unwrap_or("7d");
+
+    let interval = match timeframe {
+        "30d" => "30 days",
+        "90d" => "90 days",
+        _ => "7 days",
+    };
+
+    let query = format!(
+        r#"
+        SELECT
+            c.id,
+            c.contract_id,
+            c.name,
+            c.description,
+            c.network,
+            c.is_verified,
+            c.category,
+            c.tags,
+            c.created_at,
+            c.popularity_score,
+            COALESCE(dep.cnt, 0) AS deployment_count,
+            COALESCE(inter.cnt, 0) AS interaction_count
+        FROM contracts c
+        LEFT JOIN LATERAL (
+            SELECT COUNT(*) AS cnt
+            FROM contract_deployments cd
+            WHERE cd.contract_id = c.id
+              AND cd.deployed_at >= NOW() - INTERVAL '{interval}'
+        ) dep ON true
+        LEFT JOIN LATERAL (
+            SELECT COUNT(*) AS cnt
+            FROM contract_interactions ci
+            WHERE ci.contract_id = c.id
+              AND ci.created_at >= NOW() - INTERVAL '{interval}'
+        ) inter ON true
+        WHERE c.popularity_score > 0
+           OR c.is_verified = true
+        ORDER BY c.popularity_score DESC
+        LIMIT $1
+        "#,
+        interval = interval,
+    );
+
+    let contracts: Vec<TrendingContract> = sqlx::query_as(&query)
+        .bind(limit)
+        .fetch_all(&state.db)
+        .await
+        .map_err(|err| db_internal_error("trending contracts", err))?;
+
+    Ok(Json(contracts))
 }
 
 pub async fn route_not_found() -> ApiError {

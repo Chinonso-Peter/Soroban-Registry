@@ -9,19 +9,35 @@ pub fn contract_routes() -> Router<AppState> {
     Router::new()
         .route("/api/contracts", get(handlers::list_contracts))
         .route("/api/contracts", post(handlers::publish_contract))
+        .route(
+            "/api/contracts/trending",
+            get(handlers::get_trending_contracts),
+        )
         .route("/api/contracts/:id", get(handlers::get_contract))
         .route("/api/contracts/:id/abi", get(handlers::get_contract_abi))
-        .route("/api/contracts/:id/versions", get(handlers::get_contract_versions))
+        .route(
+            "/api/contracts/:id/versions",
+            get(handlers::get_contract_versions),
+        )
         .route(
             "/api/contracts/:id/versions",
             get(handlers::get_contract_versions),
         )
         .route("/api/contracts/verify", post(handlers::verify_contract))
-        .route("/api/contracts/:id/deployments/status", get(handlers::get_deployment_status))
+        .route(
+            "/api/contracts/:id/deployments/status",
+            get(handlers::get_deployment_status),
+        )
         .route("/api/deployments/green", post(handlers::deploy_green))
         .route("/api/deployments/switch", post(handlers::switch_deployment))
-        .route("/api/deployments/:contract_id/rollback", post(handlers::rollback_deployment))
-        .route("/api/deployments/health", post(handlers::report_health_check))
+        .route(
+            "/api/deployments/:contract_id/rollback",
+            post(handlers::rollback_deployment),
+        )
+        .route(
+            "/api/deployments/health",
+            post(handlers::report_health_check),
+        )
 }
 
 /// Publisher-related routes
@@ -45,6 +61,12 @@ pub fn health_routes() -> Router<AppState> {
 /// Migration-related routes
 pub fn migration_routes() -> Router<AppState> {
     Router::new()
-        .route("/api/migrations", post(handlers::migrations::create_migration).get(handlers::migrations::get_migrations))
-        .route("/api/migrations/:id", put(handlers::migrations::update_migration).get(handlers::migrations::get_migration))
+        .route(
+            "/api/migrations",
+            post(handlers::migrations::create_migration).get(handlers::migrations::get_migrations),
+        )
+        .route(
+            "/api/migrations/:id",
+            put(handlers::migrations::update_migration).get(handlers::migrations::get_migration),
+        )
 }
