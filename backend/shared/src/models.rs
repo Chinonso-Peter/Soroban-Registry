@@ -426,6 +426,126 @@ pub struct GetVariantRequest {
     pub user_address: String,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, sqlx::Type)]
+#[sqlx(type_name = "metric_type", rename_all = "snake_case")]
+pub enum MetricType {
+    ExecutionTime,
+    MemoryUsage,
+    StorageIo,
+    GasConsumption,
+    ErrorRate,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, sqlx::Type)]
+#[sqlx(type_name = "alert_severity", rename_all = "lowercase")]
+pub enum AlertSeverity {
+    Info,
+    Warning,
+    Critical,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, FromRow)]
+pub struct PerformanceMetric {
+    pub id: Uuid,
+    pub contract_id: Uuid,
+    pub metric_type: MetricType,
+    pub function_name: Option<String>,
+    pub value: Decimal,
+    pub p50: Option<Decimal>,
+    pub p95: Option<Decimal>,
+    pub p99: Option<Decimal>,
+    pub timestamp: DateTime<Utc>,
+    pub metadata: Option<serde_json::Value>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, FromRow)]
+pub struct PerformanceAnomaly {
+    pub id: Uuid,
+    pub contract_id: Uuid,
+    pub metric_type: MetricType,
+    pub function_name: Option<String>,
+    pub detected_at: DateTime<Utc>,
+    pub baseline_value: Option<Decimal>,
+    pub current_value: Option<Decimal>,
+    pub deviation_percent: Option<Decimal>,
+    pub severity: AlertSeverity,
+    pub resolved: bool,
+    pub resolved_at: Option<DateTime<Utc>>,
+    pub description: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, FromRow)]
+pub struct PerformanceAlert {
+    pub id: Uuid,
+    pub contract_id: Uuid,
+    pub metric_type: MetricType,
+    pub threshold_type: String,
+    pub threshold_value: Decimal,
+    pub current_value: Decimal,
+    pub severity: AlertSeverity,
+    pub triggered_at: DateTime<Utc>,
+    pub acknowledged: bool,
+    pub acknowledged_at: Option<DateTime<Utc>>,
+    pub acknowledged_by: Option<String>,
+    pub resolved: bool,
+    pub resolved_at: Option<DateTime<Utc>>,
+    pub message: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, FromRow)]
+pub struct PerformanceTrend {
+    pub id: Uuid,
+    pub contract_id: Uuid,
+    pub function_name: Option<String>,
+    pub metric_type: MetricType,
+    pub timeframe_start: DateTime<Utc>,
+    pub timeframe_end: DateTime<Utc>,
+    pub avg_value: Option<Decimal>,
+    pub min_value: Option<Decimal>,
+    pub max_value: Option<Decimal>,
+    pub p50_value: Option<Decimal>,
+    pub p95_value: Option<Decimal>,
+    pub p99_value: Option<Decimal>,
+    pub sample_count: i32,
+    pub trend_direction: Option<String>,
+    pub change_percent: Option<Decimal>,
+    pub calculated_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, FromRow)]
+pub struct PerformanceAlertConfig {
+    pub id: Uuid,
+    pub contract_id: Uuid,
+    pub metric_type: MetricType,
+    pub threshold_type: String,
+    pub threshold_value: Decimal,
+    pub severity: AlertSeverity,
+    pub enabled: bool,
+    pub created_at: DateTime<Utc>,
+    pub updated_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RecordPerformanceMetricRequest {
+    pub contract_id: String,
+    pub metric_type: MetricType,
+    pub function_name: Option<String>,
+    pub value: f64,
+    pub p50: Option<f64>,
+    pub p95: Option<f64>,
+    pub p99: Option<f64>,
+    pub metadata: Option<serde_json::Value>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CreateAlertConfigRequest {
+    pub contract_id: String,
+    pub metric_type: MetricType,
+    pub threshold_type: String,
+    pub threshold_value: f64,
+    pub severity: Option<AlertSeverity>,
+}
+
 // ────────────────────────────────────────────────────────────────────────────
 // Analytics models
 // ────────────────────────────────────────────────────────────────────────────

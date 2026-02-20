@@ -11,12 +11,14 @@ use axum::{
 };
 use shared::{
     AbTest, AbTestAssignment, AbTestMetric, AbTestResult, AbTestStatus, AbTestVariant,
-    AdvanceCanaryRequest, CanaryMetric, CanaryRelease, CanaryStatus, CanaryUserAssignment,
-    Contract, ContractDeployment, ContractSearchParams, ContractVersion, CreateAbTestRequest,
-    CreateCanaryRequest, DeployGreenRequest, DeploymentEnvironment, DeploymentStatus,
-    DeploymentSwitch, GetVariantRequest, HealthCheckRequest, PaginatedResponse,
-    PublishRequest, Publisher, RecordAbTestMetricRequest, RecordCanaryMetricRequest, RolloutStage,
-    SwitchDeploymentRequest, VariantType, VerifyRequest,
+    AdvanceCanaryRequest, AlertSeverity, CanaryMetric, CanaryRelease, CanaryStatus,
+    CanaryUserAssignment, Contract, ContractDeployment, ContractSearchParams, ContractVersion,
+    CreateAbTestRequest, CreateAlertConfigRequest, CreateCanaryRequest, DeployGreenRequest,
+    DeploymentEnvironment, DeploymentStatus, DeploymentSwitch, GetVariantRequest,
+    HealthCheckRequest, MetricType, PaginatedResponse, PerformanceAlert, PerformanceAlertConfig,
+    PerformanceAnomaly, PerformanceMetric, PerformanceTrend, PublishRequest, Publisher,
+    RecordAbTestMetricRequest, RecordCanaryMetricRequest, RecordPerformanceMetricRequest,
+    RolloutStage, SwitchDeploymentRequest, VariantType, VerifyRequest,
 };
 use rust_decimal::Decimal;
 use std::str::FromStr;
@@ -1592,4 +1594,293 @@ async fn get_ab_test_results_internal(
             } else { None }
         }
     }))
+}
+
+pub async fn record_performance_metric(
+    State(state): State<AppState>,
+    payload: Result<Json<RecordPerformanceMetricRequest>, JsonRejection>,
+) -> ApiResult<Json<PerformanceMetric>> {
+    let Json(req) = payload.map_err(map_json_rejection)?;
+
+    let contract: Contract = sqlx::query_as("SELECT * FROM contracts WHERE contract_id = $1")
+        .bind(&req.contract_id)
+        .fetch_one(&state.db)
+        .await
+        .map_err(|err| match err {
+            sqlx::Error::RowNotFound => ApiError::not_found(
+                "ContractNotFound",
+                format!("Contract not found: {}", req.contract_id),
+            ),
+            _ => db_internal_error("get contract for metric", err),
+        })?;
+
+    let value = Decimal::try_from(req.value)
+        .map_err(|_| ApiError::bad_request("InvalidMetric", "Invalid metric value"))?;
+
+    let p50 = req.p50.and_then(|v| Decimal::try_from(v).ok());
+    let p95 = req.p95.and_then(|v| Decimal::try_from(v).ok());
+    let p99 = req.p99.and_then(|v| Decimal::try_from(v).ok());
+
+    let metric: PerformanceMetric = sqlx::query_as(
+        "INSERT INTO performance_metrics (
+            contract_id, metric_type, function_name, value, p50, p95, p99, metadata
+        ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+        RETURNING *",
+    )
+    .bind(contract.id)
+    .bind(&req.metric_type)
+    .bind(&req.function_name)
+    .bind(value)
+    .bind(p50)
+    .bind(p95)
+    .bind(p99)
+    .bind(&req.metadata)
+    .fetch_one(&state.db)
+    .await
+    .map_err(|err| db_internal_error("record performance metric", err))?;
+
+    Ok(Json(metric))
+}
+
+pub async fn get_contract_performance(
+    State(state): State<AppState>,
+    Path(contract_id): Path<String>,
+    Query(params): Query<std::collections::HashMap<String, String>>,
+) -> ApiResult<Json<serde_json::Value>> {
+    let contract: Contract = sqlx::query_as("SELECT * FROM contracts WHERE contract_id = $1")
+        .bind(&contract_id)
+        .fetch_one(&state.db)
+        .await
+        .map_err(|err| match err {
+            sqlx::Error::RowNotFound => ApiError::not_found(
+                "ContractNotFound",
+                format!("Contract not found: {}", contract_id),
+            ),
+            _ => db_internal_error("get contract", err),
+        })?;
+
+    let timeframe = params.get("timeframe").map(|s| s.as_str()).unwrap_or("7d");
+    let start_time = parse_timeframe(timeframe);
+
+    let metrics: Vec<PerformanceMetric> = sqlx::query_as(
+        "SELECT * FROM performance_metrics 
+         WHERE contract_id = $1 AND timestamp >= $2
+         ORDER BY timestamp DESC",
+    )
+    .bind(contract.id)
+    .bind(start_time)
+    .fetch_all(&state.db)
+    .await
+    .map_err(|err| db_internal_error("get metrics", err))?;
+
+    let anomalies: Vec<PerformanceAnomaly> = sqlx::query_as(
+        "SELECT * FROM performance_anomalies 
+         WHERE contract_id = $1 AND detected_at >= $2 AND resolved = FALSE
+         ORDER BY detected_at DESC",
+    )
+    .bind(contract.id)
+    .bind(start_time)
+    .fetch_all(&state.db)
+    .await
+    .map_err(|err| db_internal_error("get anomalies", err))?;
+
+    let alerts: Vec<PerformanceAlert> = sqlx::query_as(
+        "SELECT * FROM performance_alerts 
+         WHERE contract_id = $1 AND triggered_at >= $2 AND resolved = FALSE
+         ORDER BY triggered_at DESC",
+    )
+    .bind(contract.id)
+    .bind(start_time)
+    .fetch_all(&state.db)
+    .await
+    .map_err(|err| db_internal_error("get alerts", err))?;
+
+    let trends: Vec<PerformanceTrend> = sqlx::query_as(
+        "SELECT * FROM performance_trends 
+         WHERE contract_id = $1 AND timeframe_start >= $2
+         ORDER BY timeframe_start DESC",
+    )
+    .bind(contract.id)
+    .bind(start_time)
+    .fetch_all(&state.db)
+    .await
+    .map_err(|err| db_internal_error("get trends", err))?;
+
+    let slow_functions = identify_slow_functions(&metrics);
+
+    Ok(Json(serde_json::json!({
+        "contract_id": contract_id,
+        "timeframe": timeframe,
+        "metrics": metrics,
+        "anomalies": anomalies,
+        "alerts": alerts,
+        "trends": trends,
+        "slow_functions": slow_functions,
+        "summary": {
+            "total_metrics": metrics.len(),
+            "active_anomalies": anomalies.len(),
+            "active_alerts": alerts.len(),
+            "trends_analyzed": trends.len()
+        }
+    })))
+}
+
+fn parse_timeframe(timeframe: &str) -> DateTime<Utc> {
+    let now = chrono::Utc::now();
+    let duration = if timeframe.ends_with('d') {
+        let days: i64 = timeframe[..timeframe.len() - 1].parse().unwrap_or(7);
+        chrono::Duration::days(days)
+    } else if timeframe.ends_with('h') {
+        let hours: i64 = timeframe[..timeframe.len() - 1].parse().unwrap_or(24);
+        chrono::Duration::hours(hours)
+    } else if timeframe.ends_with('m') {
+        let minutes: i64 = timeframe[..timeframe.len() - 1].parse().unwrap_or(60);
+        chrono::Duration::minutes(minutes)
+    } else {
+        chrono::Duration::days(7)
+    };
+    now - duration
+}
+
+fn identify_slow_functions(metrics: &[PerformanceMetric]) -> Vec<serde_json::Value> {
+    use std::collections::HashMap;
+    let mut function_stats: HashMap<String, (Vec<f64>, usize)> = HashMap::new();
+
+    for metric in metrics {
+        if metric.metric_type == MetricType::ExecutionTime {
+            if let Some(ref func_name) = metric.function_name {
+                let entry = function_stats.entry(func_name.clone()).or_insert_with(|| (Vec::new(), 0));
+                if let Ok(val) = metric.value.to_string().parse::<f64>() {
+                    entry.0.push(val);
+                }
+                if let Some(ref p99) = metric.p99 {
+                    if let Ok(p99_val) = p99.to_string().parse::<f64>() {
+                        entry.0.push(p99_val);
+                    }
+                }
+                entry.1 += 1;
+            }
+        }
+    }
+
+    let mut slow_functions: Vec<_> = function_stats
+        .into_iter()
+        .map(|(name, (values, count))| {
+            let sum: f64 = values.iter().sum();
+            let avg = if values.is_empty() { 0.0 } else { sum / values.len() as f64 };
+            let max = values.iter().copied().fold(0.0, f64::max);
+            serde_json::json!({
+                "function_name": name,
+                "avg_execution_time": avg,
+                "max_execution_time": max,
+                "sample_count": count
+            })
+        })
+        .collect();
+
+    slow_functions.sort_by(|a, b| {
+        let a_val = a["avg_execution_time"].as_f64().unwrap_or(0.0);
+        let b_val = b["avg_execution_time"].as_f64().unwrap_or(0.0);
+        b_val.partial_cmp(&a_val).unwrap_or(std::cmp::Ordering::Equal)
+    });
+
+    slow_functions.into_iter().take(10).collect()
+}
+
+pub async fn create_alert_config(
+    State(state): State<AppState>,
+    payload: Result<Json<CreateAlertConfigRequest>, JsonRejection>,
+) -> ApiResult<Json<PerformanceAlertConfig>> {
+    let Json(req) = payload.map_err(map_json_rejection)?;
+
+    let contract: Contract = sqlx::query_as("SELECT * FROM contracts WHERE contract_id = $1")
+        .bind(&req.contract_id)
+        .fetch_one(&state.db)
+        .await
+        .map_err(|err| match err {
+            sqlx::Error::RowNotFound => ApiError::not_found(
+                "ContractNotFound",
+                format!("Contract not found: {}", req.contract_id),
+            ),
+            _ => db_internal_error("get contract", err),
+        })?;
+
+    let threshold_value = Decimal::try_from(req.threshold_value)
+        .map_err(|_| ApiError::bad_request("InvalidThreshold", "Invalid threshold value"))?;
+
+    let severity = req.severity.unwrap_or(AlertSeverity::Warning);
+
+    let config: PerformanceAlertConfig = sqlx::query_as(
+        "INSERT INTO performance_alert_configs (
+            contract_id, metric_type, threshold_type, threshold_value, severity
+        ) VALUES ($1, $2, $3, $4, $5)
+        ON CONFLICT (contract_id, metric_type, threshold_type)
+        DO UPDATE SET threshold_value = EXCLUDED.threshold_value,
+                      severity = EXCLUDED.severity,
+                      updated_at = NOW()
+        RETURNING *",
+    )
+    .bind(contract.id)
+    .bind(&req.metric_type)
+    .bind(&req.threshold_type)
+    .bind(threshold_value)
+    .bind(&severity)
+    .fetch_one(&state.db)
+    .await
+    .map_err(|err| db_internal_error("create alert config", err))?;
+
+    Ok(Json(config))
+}
+
+pub async fn get_performance_anomalies(
+    State(state): State<AppState>,
+    Path(contract_id): Path<String>,
+) -> ApiResult<Json<Vec<PerformanceAnomaly>>> {
+    let contract: Contract = sqlx::query_as("SELECT * FROM contracts WHERE contract_id = $1")
+        .bind(&contract_id)
+        .fetch_one(&state.db)
+        .await
+        .map_err(|err| match err {
+            sqlx::Error::RowNotFound => ApiError::not_found(
+                "ContractNotFound",
+                format!("Contract not found: {}", contract_id),
+            ),
+            _ => db_internal_error("get contract", err),
+        })?;
+
+    let anomalies: Vec<PerformanceAnomaly> = sqlx::query_as(
+        "SELECT * FROM performance_anomalies 
+         WHERE contract_id = $1 AND resolved = FALSE
+         ORDER BY detected_at DESC",
+    )
+    .bind(contract.id)
+    .fetch_all(&state.db)
+    .await
+    .map_err(|err| db_internal_error("get anomalies", err))?;
+
+    Ok(Json(anomalies))
+}
+
+pub async fn acknowledge_alert(
+    State(state): State<AppState>,
+    Path(alert_id): Path<String>,
+) -> ApiResult<Json<serde_json::Value>> {
+    let alert_uuid = Uuid::parse_str(&alert_id).map_err(|_| {
+        ApiError::bad_request("InvalidAlertId", format!("Invalid alert ID: {}", alert_id))
+    })?;
+
+    sqlx::query(
+        "UPDATE performance_alerts 
+         SET acknowledged = TRUE, acknowledged_at = NOW()
+         WHERE id = $1",
+    )
+    .bind(alert_uuid)
+    .execute(&state.db)
+    .await
+    .map_err(|err| db_internal_error("acknowledge alert", err))?;
+
+    Ok(Json(serde_json::json!({
+        "success": true,
+        "alert_id": alert_id
+    })))
 }

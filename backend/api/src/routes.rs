@@ -27,6 +27,7 @@ pub fn contract_routes() -> Router<AppState> {
         .route("/api/deployments/:contract_id/rollback", post(handlers::rollback_deployment))
         .route("/api/deployments/health", post(handlers::report_health_check))
         .route("/api/contracts/:id/state/:key", get(handlers::get_contract_state).post(handlers::update_contract_state))
+        .route("/api/contracts/:id/performance", get(handlers::get_contract_performance))
 }
 
 /// Publisher-related routes
@@ -73,4 +74,12 @@ pub fn ab_test_routes() -> Router<AppState> {
         .route("/api/ab-tests/metrics", post(handlers::record_ab_test_metric))
         .route("/api/ab-tests/:id/results", get(handlers::get_ab_test_results))
         .route("/api/ab-tests/:id/rollout", post(handlers::rollout_winning_variant))
+}
+
+pub fn performance_routes() -> Router<AppState> {
+    Router::new()
+        .route("/api/performance/metrics", post(handlers::record_performance_metric))
+        .route("/api/performance/alerts/config", post(handlers::create_alert_config))
+        .route("/api/performance/anomalies/:contract_id", get(handlers::get_performance_anomalies))
+        .route("/api/performance/alerts/:id/acknowledge", post(handlers::acknowledge_alert))
 }
