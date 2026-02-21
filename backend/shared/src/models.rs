@@ -194,6 +194,26 @@ pub struct VerifyRequest {
     pub compiler_version: String,
 }
 
+/// Sorting options for contracts
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "lowercase")]
+pub enum SortBy {
+    CreatedAt,
+    UpdatedAt,
+    Popularity,
+    Deployments,
+    Interactions,
+    Relevance,
+}
+
+/// Sorting order
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "lowercase")]
+pub enum SortOrder {
+    Asc,
+    Desc,
+}
+
 /// Search/filter parameters for contracts
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ContractSearchParams {
@@ -206,9 +226,9 @@ pub struct ContractSearchParams {
     pub page: Option<i64>,
     #[serde(alias = "page_size")]
     pub limit: Option<i64>,
+    pub sort_by: Option<SortBy>,
+    pub sort_order: Option<SortOrder>,
 }
-
-// Add to shared/src/lib.rs after ContractSearchParams
 
 /// Pagination params for contract versions (limit/offset style)
 #[derive(Debug, Clone, Serialize, Deserialize)]
