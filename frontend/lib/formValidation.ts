@@ -35,7 +35,9 @@ export function useFormValidation<T extends Record<string, any>>(opts: {
       setErrors(nextErrors);
       validatingRef.current = null;
     }, debounceMs);
-    return () => validatingRef.current && clearTimeout(validatingRef.current);
+    return () => {
+      if (validatingRef.current) clearTimeout(validatingRef.current);
+    };
   }, [values, validate, debounceMs, runValidation]);
 
   const handleChange = useCallback(
