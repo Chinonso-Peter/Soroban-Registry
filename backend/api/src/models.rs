@@ -300,96 +300,28 @@ fn default_alert_threshold() -> f64 {
     10.0
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, sqlx::Type)]
-#[sqlx(type_name = "text", rename_all = "snake_case")]
-pub enum BenchmarkStatus {
-    Pending,
-    Running,
-    Completed,
-    Failed,
-}
 
-/// One row in `benchmark_records`
-#[derive(Debug, Clone, Serialize, Deserialize, FromRow)]
-pub struct BenchmarkRecord {
-    pub id: Uuid,
-    pub contract_id: Uuid,
-    pub contract_version: String,
-    pub method_name: String,
-    pub iterations: i32,
-    pub args_json: Option<serde_json::Value>,
-    pub status: BenchmarkStatus,
-    pub min_ms: f64,
-    pub max_ms: f64,
-    pub avg_ms: f64,
-    pub p95_ms: f64,
-    pub p99_ms: f64,
-    pub stddev_ms: f64,
-    pub completed_at: Option<DateTime<Utc>>,
-    pub created_at: DateTime<Utc>,
-}
-
-/// One row in `benchmark_runs`
-#[derive(Debug, Clone, Serialize, Deserialize, FromRow)]
-pub struct BenchmarkRun {
-    pub id: Uuid,
-    pub benchmark_id: Uuid,
-    pub iteration: i32,
-    pub execution_time_ms: f64,
-    pub cpu_instructions: Option<i64>,
-    pub memory_bytes: Option<i64>,
-}
-
-/// One row in `performance_alerts`
-#[derive(Debug, Clone, Serialize, Deserialize, FromRow)]
-pub struct PerformanceAlert {
-    pub id: Uuid,
-    pub contract_id: Uuid,
-    pub method_name: String,
-    pub baseline_benchmark_id: Uuid,
-    pub current_benchmark_id: Uuid,
-    pub baseline_p95_ms: f64,
-    pub current_p95_ms: f64,
-    pub regression_pct: f64,
-    pub alert_threshold_pct: f64,
-    pub resolved: bool,
-    pub created_at: DateTime<Utc>,
-}
-
-/// Comparison between current and previous benchmark
-#[derive(Debug, Clone, Serialize)]
-pub struct BenchmarkComparison {
-    pub previous_benchmark_id: Uuid,
-    pub previous_version: String,
-    pub previous_p95_ms: f64,
-    pub current_p95_ms: f64,
-    pub delta_ms: f64,
-    pub delta_pct: f64,
-    pub is_regression: bool,
-}
-
-/// Full benchmark response sent to client
-#[derive(Debug, Serialize)]
-pub struct BenchmarkResponse {
-    pub benchmark: BenchmarkRecord,
-    pub runs: Vec<BenchmarkRun>,
-    pub alert: Option<PerformanceAlert>,
-    pub comparison: Option<BenchmarkComparison>,
-}
-
-/// Point in a benchmark trend time-series
-#[derive(Debug, Clone, Serialize, FromRow)]
-pub struct BenchmarkTrendPoint {
-    pub benchmark_id: Uuid,
+// --- Reviews & Ratings Models ---
+#[derive(Debug, Deserialize)]
+pub struct CreateReviewRequest {
     pub version: String,
-    pub created_at: DateTime<Utc>,
-    pub p95_ms: f64,
-    pub avg_ms: f64,
-    pub min_ms: f64,
-    pub max_ms: f64,
+    pub rating: f32,
+    pub review_text: Option<String>,
 }
 
-/// Dashboard summary for a contract's benchmarks
+#[derive(Debug, Serialize, FromRow)]
+pub struct ReviewResponse {
+    pub id: i32,
+    pub contract_id: Uuid,
+    pub user_id: Uuid,
+    pub version: String,
+    pub rating: f32,
+    pub review_text: Option<String>,
+    pub helpful_count: i32,
+    pub is_flagged: bool,
+    pub created_at: DateTime<Utc>,
+}
+
 #[derive(Debug, Serialize)]
 pub struct ContractBenchmarkSummary {
     pub contract_id: Uuid,
@@ -426,4 +358,64 @@ pub struct NetworkCriteria {
     pub stability: f32, // 0.0 - 1.0
     pub cost_multiplier: f32, 
     pub latency_ms: u32,
+}
+
+// ─────────────────────────────────────────────────────────
+// Formal Verification Types
+// ─────────────────────────────────────────────────────────
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, sqlx::Type)]
+#[sqlx(type_name = "verification_status", rename_all = "PascalCase")]
+pub enum VerificationStatus {
+    Proved,
+    Violated,
+    Unknown,
+    Skipped,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, FromRow)]
+pub struct FormalVerificationSession {
+    pub id: Uuid,
+    pub contract_id: Uuid,
+    pub version: String,
+    pub verifier_version: String,
+    pub created_at: DateTime<Utc>,
+    pub updated_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, FromRow)]
+pub struct FormalVerificationProperty {
+    pub id: Uuid,
+    pub session_id: Uuid,
+    pub property_id: String,
+    pub description: Option<String>,
+    pub invariant: String,
+    pub severity: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, FromRow)]
+pub struct FormalVerificationResult {
+    pub id: Uuid,
+    pub property_id: Uuid,
+    pub status: VerificationStatus,
+    pub counterexample: Option<String>,
+    pub details: Option<String>,
+}
+
+#[derive(Debug, Deserialize, Serialize)]
+pub struct RunVerificationRequest {
+    pub properties_file: String, // could be raw TOML string or base64
+    pub verifier_version: Option<String>,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct FormalVerificationPropertyResult {
+    pub property: FormalVerificationProperty,
+    pub result: FormalVerificationResult,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct FormalVerificationReport {
+    pub session: FormalVerificationSession,
+    pub properties: Vec<FormalVerificationPropertyResult>,
 }

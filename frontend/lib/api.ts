@@ -20,6 +20,7 @@ export interface Contract {
   downloads?: number;
   created_at: string;
   updated_at: string;
+  is_maintenance?: boolean;
 }
 
 export interface ContractHealth {
@@ -70,6 +71,13 @@ export interface DependencyTreeNode {
   dependencies: DependencyTreeNode[];
 }
 
+export interface MaintenanceWindow {
+  message: string;
+  scheduled_end_at?: string;
+}
+
+export type MaturityLevel = 'alpha' | 'beta' | 'stable' | 'mature' | 'legacy';
+
 export interface ContractSearchParams {
   query?: string;
   network?: "mainnet" | "testnet" | "futurenet";
@@ -83,6 +91,7 @@ export interface ContractSearchParams {
   sort_by?: "name" | "created_at" | "popularity" | "downloads";
   sort_order?: "asc" | "desc";
   tags?: string[];
+  maturity?: 'alpha' | 'beta' | 'stable' | 'mature' | 'legacy';
   page?: number;
   page_size?: number;
 }
@@ -329,8 +338,30 @@ export const api = {
   },
 
   async getContractHealth(id: string): Promise<ContractHealth> {
-    const response = await fetch(apiUrl(`/api/contracts/${id}/health`));
+    const response = await fetch(`${API_URL}/api/contracts/${id}/health`);
     if (!response.ok) throw new Error("Failed to fetch contract health");
+    return response.json();
+  },
+
+  async getFormalVerificationResults(id: string): Promise<FormalVerificationReport[]> {
+    if (USE_MOCKS) {
+      return Promise.resolve([]);
+    }
+    const response = await fetch(`${API_URL}/api/contracts/${id}/formal-verification`);
+    if (!response.ok) throw new Error('Failed to fetch formal verification results');
+    return response.json();
+  },
+
+  async runFormalVerification(id: string, data: RunVerificationRequest): Promise<FormalVerificationReport> {
+    if (USE_MOCKS) {
+      throw new Error('Formal verification is not supported in mock mode');
+    }
+    const response = await fetch(`${API_URL}/api/contracts/${id}/formal-verification`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(data),
+    });
+    if (!response.ok) throw new Error('Failed to run formal verification');
     return response.json();
   },
 
@@ -406,10 +437,19 @@ export const api = {
     const queryParams = new URLSearchParams();
     if (network) queryParams.append("network", network);
     const qs = queryParams.toString();
-    const response = await fetch(
-      apiUrl(`/api/contracts/graph${qs ? `?${qs}` : ""}`),
-    );
+
+    const response = await fetch(`${API_URL}/api/contracts/graph${qs ? `?${qs}` : ""}`);
     if (!response.ok) throw new Error("Failed to fetch contract graph");
+    return response.json();
+  },
+
+  async getTemplates(): Promise<Template[]> {
+    if (USE_MOCKS) {
+      return Promise.resolve([]);
+    }
+    const response = await fetch(`${API_URL}/api/templates`);
+    if (!response.ok) throw new Error('Failed to fetch templates');
+
     return response.json();
   },
 };
@@ -451,6 +491,7 @@ export interface GraphResponse {
   nodes: GraphNode[];
   edges: GraphEdge[];
 }
+
 
 export interface ContractExample {
   id: string;
@@ -502,3 +543,47 @@ export interface AddCompatibilityRequest {
   is_compatible: boolean;
 }
 
+// ─── Formal Verification ─────────────────────────────────────────────────────
+
+export type VerificationStatus = 'Proved' | 'Violated' | 'Unknown' | 'Skipped';
+
+export interface FormalVerificationSession {
+  id: string;
+  contract_id: string;
+  version: string;
+  verifier_version: string;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface FormalVerificationProperty {
+  id: string;
+  session_id: string;
+  property_id: string;
+  description?: string;
+  invariant: string;
+  severity: string;
+}
+
+export interface FormalVerificationResult {
+  id: string;
+  property_id: string;
+  status: VerificationStatus;
+  counterexample?: string;
+  details?: string;
+}
+
+export interface FormalVerificationPropertyResult {
+  property: FormalVerificationProperty;
+  result: FormalVerificationResult;
+}
+
+export interface FormalVerificationReport {
+  session: FormalVerificationSession;
+  properties: FormalVerificationPropertyResult[];
+}
+
+export interface RunVerificationRequest {
+  properties_file: string;
+  verifier_version?: string;
+}
