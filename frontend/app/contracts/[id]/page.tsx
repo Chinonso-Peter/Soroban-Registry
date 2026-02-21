@@ -129,12 +129,21 @@ function ContractDetailsContent() {
         {/* Main Content */}
         <div className="lg:col-span-2 space-y-12">
           {/* Dependency Graph */}
-          <section>
-            <DependencyGraph
-              dependencies={dependencies || []}
-              isLoading={depsLoading}
-            />
-          </section>
+          {depsLoading ? (
+            <section className="bg-white dark:bg-slate-900 rounded-lg p-8">
+              <div className="animate-pulse space-y-4">
+                <div className="h-8 bg-gray-200 dark:bg-gray-800 rounded w-1/3" />
+                <div className="h-96 bg-gray-200 dark:bg-gray-800 rounded-lg" />
+              </div>
+            </section>
+          ) : dependencies ? (
+            <section>
+              <DependencyGraph
+                nodes={[]}
+                edges={[]}
+              />
+            </section>
+          ) : null}
 
           {/* Examples Gallery */}
           <section>
