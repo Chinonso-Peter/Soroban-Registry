@@ -5,8 +5,11 @@ mod analytics;
 mod breaking_changes;
 mod cache;
 mod compatibility_testing_handlers;
+mod db_monitoring;
+
+mod activity_feed_handlers;
+mod activity_feed_routes;
 mod custom_metrics_handlers;
-mod migration_handlers;
 mod dependency;
 mod deprecation_handlers;
 mod error;
@@ -17,11 +20,12 @@ pub mod health_monitor;
 mod health_tests;
 mod metrics;
 mod metrics_handler;
+mod migration_handlers;
 mod rate_limit;
-pub mod request_tracing;
-mod routes;
 mod release_notes_handlers;
 mod release_notes_routes;
+pub mod request_tracing;
+mod routes;
 pub mod signing_handlers;
 mod state;
 mod type_safety;
@@ -31,17 +35,34 @@ mod validation;
 // mod resource_handlers;
 // mod resource_tracking;
 
+
 use anyhow::Result;
-use axum::http::{header, HeaderValue, Method};
+use axum::extract::{Request, State};
+use axum::http::{header, HeaderValue, Method, StatusCode};
+use axum::response::Response;
 use axum::{middleware, Router};
 use dotenv::dotenv;
 use prometheus::Registry;
 use sqlx::postgres::PgPoolOptions;
 use std::net::SocketAddr;
-use std::sync::atomic::AtomicBool;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use tower_http::cors::CorsLayer;
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
+
+async fn track_in_flight_middleware(
+    State(state): State<AppState>,
+    req: Request,
+    next: middleware::Next,
+) -> Result<Response, StatusCode> {
+    if state.is_shutting_down.load(Ordering::Relaxed) {
+        return Err(StatusCode::SERVICE_UNAVAILABLE);
+    }
+    crate::metrics::HTTP_IN_FLIGHT.inc();
+    let res = next.run(req).await;
+    crate::metrics::HTTP_IN_FLIGHT.dec();
+    Ok(res)
+}
 
 use crate::rate_limit::RateLimitState;
 use crate::state::AppState;
@@ -54,11 +75,28 @@ async fn main() -> Result<()> {
     // Initialize structured JSON tracing (ELK/Splunk compatible)
     request_tracing::init_json_tracing();
 
-    // Database connection
+    // Database connection with dynamic pool size
     let database_url = std::env::var("DATABASE_URL").expect("DATABASE_URL must be set");
 
+    let logical_cores = std::thread::available_parallelism()
+        .map(|n| n.get())
+        .unwrap_or(4);
+
+    let default_max_pool = (logical_cores * 2).max(10);
+    let max_pool_size = std::env::var("DB_MAX_POOL_SIZE")
+        .ok()
+        .and_then(|s| s.parse::<u32>().ok())
+        .unwrap_or(default_max_pool as u32);
+
+    tracing::info!(
+        max_pool_size = max_pool_size,
+        logical_cores = logical_cores,
+        "Initializing database connection pool"
+    );
+
     let pool = PgPoolOptions::new()
-        .max_connections(5)
+        .max_connections(max_pool_size)
+        .acquire_timeout(std::time::Duration::from_secs(30))
         .connect(&database_url)
         .await?;
 
@@ -93,20 +131,39 @@ async fn main() -> Result<()> {
 
     // Create app state
     let is_shutting_down = Arc::new(AtomicBool::new(false));
+background-job-queue
   background-job-queue
     let state = AppState::new(pool.clone(), registry, job_engine, is_shutting_down.clone());
     
+
+    // Spawn the background DB and cache monitoring task
+    db_monitoring::spawn_db_monitoring_task(pool.clone(), state.cache.clone());
+
+main
     // Warm up the cache
     state.cache.clone().warm_up(pool.clone());
 
 main
     let rate_limit_state = RateLimitState::from_env();
 
+    let allowed_origins = std::env::var("ALLOWED_ORIGINS").unwrap_or_else(|_| {
+        "http://localhost:3000,https://soroban-registry.vercel.app".to_string()
+    });
+
+    let origins: Vec<HeaderValue> = allowed_origins
+        .split(',')
+        .filter_map(|s| {
+            let s = s.trim();
+            if s.is_empty() {
+                None
+            } else {
+                Some(HeaderValue::from_str(s).expect("Invalid allowed origin"))
+            }
+        })
+        .collect();
+
     let cors = CorsLayer::new()
-        .allow_origin([
-            HeaderValue::from_static("http://localhost:3000"),
-            HeaderValue::from_static("https://soroban-registry.vercel.app"),
-        ])
+        .allow_origin(origins)
         .allow_methods([Method::GET, Method::POST, Method::OPTIONS])
         .allow_headers([header::CONTENT_TYPE, header::AUTHORIZATION]);
 
@@ -118,22 +175,26 @@ main
         .merge(routes::migration_routes())
         .merge(routes::compatibility_dashboard_routes())
         .merge(release_notes_routes::release_notes_routes())
+        .nest("/api", activity_feed_routes::routes())
         .fallback(handlers::route_not_found)
         .layer(middleware::from_fn(request_tracing::tracing_middleware))
+        .layer(middleware::from_fn_with_state(
+            state.clone(),
+            track_in_flight_middleware,
+        ))
         .layer(middleware::from_fn_with_state(
             rate_limit_state,
             rate_limit::rate_limit_middleware,
         ))
-        .layer(CorsLayer::permissive())
         .layer(cors)
-        .with_state(state);
+        .with_state(state.clone());
 
     // Start server
     let addr = SocketAddr::from(([0, 0, 0, 0], 3001));
     tracing::info!("API server listening on {}", addr);
 
     let listener = tokio::net::TcpListener::bind(addr).await?;
-    let (tx, rx) = tokio::sync::oneshot::channel::<()>();
+    let (tx, mut rx) = tokio::sync::mpsc::channel::<()>(1);
 
     let server = axum::serve(
         listener,
@@ -162,32 +223,71 @@ main
             _ = terminate => {},
         }
 
-        tracing::info!(
-            "SIGTERM/SIGINT received. Failing health checks and stopping new requests..."
-        );
-        is_shutting_down.store(true, std::sync::atomic::Ordering::SeqCst);
-        let _ = tx.send(());
+        tracing::info!("SIGTERM/SIGINT received. Failing health checks and stopping new requests...");
+        let _ = tx.send(()).await;
     });
 
-    tokio::select! {
-        res = server => {
-            if let Err(e) = res {
-                tracing::error!("Server error: {}", e);
-            }
+    let server_task = tokio::spawn(async move {
+        if let Err(e) = server.await {
+            tracing::error!("Server error: {}", e);
         }
-        _ = async {
-            let _ = rx.await;
-            tracing::info!("Draining active requests (timeout: 30s)...");
-            tokio::time::sleep(tokio::time::Duration::from_secs(30)).await;
-            tracing::warn!("Drain timeout reached. Forcing shutdown...");
-        } => {}
-    }
+    });
 
-    tracing::info!("Closing database connections...");
-    pool.close().await;
-    tracing::info!("Shutdown complete");
+    if let Some(()) = rx.recv().await {
+        is_shutting_down.store(true, Ordering::SeqCst);
+        let initial_in_flight = crate::metrics::HTTP_IN_FLIGHT.get();
+        tracing::info!("Graceful shutdown initiated. In-flight requests: {}", initial_in_flight);
+
+        let timeout_secs = std::env::var("SHUTDOWN_TIMEOUT")
+            .unwrap_or_else(|_| "30".to_string())
+            .parse::<u64>()
+            .unwrap_or(30);
+
+        let start_time = std::time::Instant::now();
+        let timeout_duration = std::time::Duration::from_secs(timeout_secs);
+        
+        let mut success = false;
+        loop {
+            let in_flight = crate::metrics::HTTP_IN_FLIGHT.get();
+            if in_flight == 0 {
+                tracing::info!(
+                    "All in-flight requests completed in {}ms. In-flight: 0",
+                    start_time.elapsed().as_millis()
+                );
+                success = true;
+                break;
+            }
+            if start_time.elapsed() > timeout_duration {
+                tracing::error!(
+                    "Graceful shutdown timeout ({}s) reached. {} requests still in-flight.",
+                    timeout_secs,
+                    in_flight
+                );
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        }
+
+        tracing::info!("Closing database connections cleanly...");
+        pool.close().await;
+        
+        let shutdown_duration = start_time.elapsed();
+        tracing::info!(
+            "Shutdown complete. Duration: {}ms",
+            shutdown_duration.as_millis()
+        );
+
+        if success {
+            std::process::exit(0);
+        } else {
+            std::process::exit(1);
+        }
+    } else {
+        let _ = server_task.await;
+        tracing::info!("Closing database connections cleanly...");
+        pool.close().await;
+        tracing::info!("Shutdown complete");
+    }
 
     Ok(())
 }
-
-

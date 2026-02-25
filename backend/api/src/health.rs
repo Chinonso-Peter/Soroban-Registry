@@ -1,7 +1,7 @@
+use crate::error::ApiResult;
+use chrono::{DateTime, Duration, Utc};
 use sqlx::PgPool;
 use uuid::Uuid;
-use chrono::{DateTime, Utc, Duration};
-use crate::error::ApiResult;
 
 /// Calculates the health score for a single contract.
 /// Health score: 0-100 calculated from:
@@ -36,18 +36,17 @@ pub async fn calculate_health_score(pool: &PgPool, contract_id: Uuid) -> ApiResu
     score += (deployments.min(20)) as i32;
 
     // 3. Update frequency (20 points) & Abandonment (10 points)
-    let last_update: Option<DateTime<Utc>> = sqlx::query_scalar(
-        "SELECT MAX(created_at) FROM contract_versions WHERE contract_id = $1"
-    )
-    .bind(contract_id)
-    .fetch_optional(pool)
-    .await
-    .unwrap_or(None);
+    let last_update: Option<DateTime<Utc>> =
+        sqlx::query_scalar("SELECT MAX(created_at) FROM contract_versions WHERE contract_id = $1")
+            .bind(contract_id)
+            .fetch_optional(pool)
+            .await
+            .unwrap_or(None);
 
     let mut activity_score = 10; // Not abandoned by default
     if let Some(last_date) = last_update {
         let age = Utc::now() - last_date;
-        
+
         if age < Duration::days(30) {
             score += 20;
         } else if age < Duration::days(90) {
@@ -67,7 +66,7 @@ pub async fn calculate_health_score(pool: &PgPool, contract_id: Uuid) -> ApiResu
 
     // 4. Security issues (10 points)
     // Checking both contract_scan_results and security_patches applied/pending
-    let security_deduction = sqlx::query_scalar!(
+    let security_deduction: i32 = sqlx::query_scalar(
         r#"
         SELECT COALESCE(MAX(
             CASE 
@@ -75,16 +74,15 @@ pub async fn calculate_health_score(pool: &PgPool, contract_id: Uuid) -> ApiResu
                 WHEN v.severity = 'medium' OR v.severity = 'low' THEN 5
                 ELSE 0
             END
-        ), 0) as deduction
+        ), 0)
         FROM contract_scan_results sr
         JOIN cve_vulnerabilities v ON sr.cve_id = v.cve_id
         WHERE sr.contract_id = $1 AND sr.is_false_positive = false
         "#,
-        contract_id
     )
+    .bind(contract_id)
     .fetch_one(pool)
     .await
-    .unwrap_or(None)
     .unwrap_or(0);
 
     let security_base = 10;
@@ -98,22 +96,38 @@ pub async fn update_all_health_scores(pool: &PgPool) -> ApiResult<()> {
     let contract_ids: Vec<Uuid> = sqlx::query_scalar("SELECT id FROM contracts")
         .fetch_all(pool)
         .await
-        .map_err(|e| crate::error::ApiError::internal(format!("Failed to fetch contracts: {}", e)))?;
+        .map_err(|e| {
+            crate::error::ApiError::internal(format!("Failed to fetch contracts: {}", e))
+        })?;
 
-    tracing::info!("Starting health score update for {} contracts", contract_ids.len());
+    tracing::info!(
+        "Starting health score update for {} contracts",
+        contract_ids.len()
+    );
 
     for id in contract_ids {
         match calculate_health_score(pool, id).await {
             Ok(score) => {
-                sqlx::query("UPDATE contracts SET health_score = $1, updated_at = NOW() WHERE id = $2")
-                    .bind(score)
-                    .bind(id)
-                    .execute(pool)
-                    .await
-                    .map_err(|e| crate::error::ApiError::internal(format!("Failed to update health score for {}: {}", id, e)))?;
+                sqlx::query(
+                    "UPDATE contracts SET health_score = $1, updated_at = NOW() WHERE id = $2",
+                )
+                .bind(score)
+                .bind(id)
+                .execute(pool)
+                .await
+                .map_err(|e| {
+                    crate::error::ApiError::internal(format!(
+                        "Failed to update health score for {}: {}",
+                        id, e
+                    ))
+                })?;
             }
             Err(e) => {
-                tracing::error!("Failed to calculate health score for contract {}: {}", id, e);
+                tracing::error!(
+                    "Failed to calculate health score for contract {}: {}",
+                    id,
+                    e
+                );
             }
         }
     }

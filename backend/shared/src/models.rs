@@ -211,6 +211,28 @@ pub struct PublishRequest {
     pub dependencies: Vec<DependencyDeclaration>,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct UpdateContractMetadataRequest {
+    pub name: Option<String>,
+    pub description: Option<String>,
+    pub category: Option<String>,
+    pub tags: Option<Vec<String>>,
+    pub user_id: Option<Uuid>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ChangePublisherRequest {
+    pub publisher_address: String,
+    pub user_id: Option<Uuid>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct UpdateContractStatusRequest {
+    pub status: String,
+    pub error_message: Option<String>,
+    pub user_id: Option<Uuid>,
+}
+
 /// Request to create a new contract version with ABI
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CreateContractVersionRequest {
@@ -366,6 +388,7 @@ pub struct ContractSearchParams {
     pub limit: Option<i64>,
     pub sort_by: Option<SortBy>,
     pub sort_order: Option<SortOrder>,
+    pub cursor: Option<String>,
 }
 
 /// Pagination params for contract versions (limit/offset style)
@@ -388,6 +411,8 @@ pub struct PaginatedVersionResponse {
     pub total: i64,
     pub limit: i64,
     pub offset: i64,
+    pub next_cursor: Option<String>,
+    pub prev_cursor: Option<String>,
 }
 
 /// Paginated response
@@ -399,6 +424,8 @@ pub struct PaginatedResponse<T> {
     pub page: i64,
     #[serde(rename = "pages")]
     pub total_pages: i64,
+    pub next_cursor: Option<String>,
+    pub prev_cursor: Option<String>,
 }
 
 impl<T> PaginatedResponse<T> {
@@ -413,7 +440,15 @@ impl<T> PaginatedResponse<T> {
             total,
             page,
             total_pages,
+            next_cursor: None,
+            prev_cursor: None,
         }
+    }
+
+    pub fn with_cursors(mut self, next: Option<String>, prev: Option<String>) -> Self {
+        self.next_cursor = next;
+        self.prev_cursor = prev;
+        self
     }
 }
 
@@ -432,6 +467,9 @@ pub struct ContractInteraction {
     pub method: Option<String>,
     pub parameters: Option<serde_json::Value>,
     pub return_value: Option<serde_json::Value>,
+    pub interaction_timestamp: Option<DateTime<Utc>>,
+    pub interaction_count: Option<i64>,
+    pub network: Option<Network>,
     pub created_at: DateTime<Utc>,
 }
 
@@ -458,6 +496,10 @@ pub struct InteractionsQueryParams {
     pub method: Option<String>,
     pub from_timestamp: Option<String>,
     pub to_timestamp: Option<String>,
+    pub days: Option<i64>,
+    pub interaction_type: Option<String>,
+    pub network: Option<Network>,
+    pub cursor: Option<String>,
 }
 
 fn default_interactions_limit() -> i64 {
@@ -468,11 +510,13 @@ fn default_interactions_limit() -> i64 {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CreateInteractionRequest {
     pub account: Option<String>,
+    pub interaction_type: Option<String>,
     pub method: Option<String>,
     pub transaction_hash: Option<String>,
     pub parameters: Option<serde_json::Value>,
     pub return_value: Option<serde_json::Value>,
     pub timestamp: Option<DateTime<Utc>>,
+    pub network: Option<Network>,
 }
 
 /// Request body for POST /api/contracts/:id/interactions/batch
@@ -488,6 +532,25 @@ pub struct InteractionsListResponse {
     pub total: i64,
     pub limit: i64,
     pub offset: i64,
+    pub next_cursor: Option<String>,
+    pub prev_cursor: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct InteractionTimeSeriesPoint {
+    pub date: chrono::NaiveDate,
+    pub interaction_type: String,
+    pub count: i64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct InteractionTimeSeriesResponse {
+    pub contract_id: Uuid,
+    pub days: i64,
+    pub interactions_this_week: i64,
+    pub interactions_last_week: i64,
+    pub is_trending: bool,
+    pub series: Vec<InteractionTimeSeriesPoint>,
 }
 
 /// Migration status
@@ -968,6 +1031,8 @@ pub enum AnalyticsEventType {
     ContractVerified,
     ContractDeployed,
     VersionCreated,
+    ContractUpdated,
+    PublisherCreated,
 }
 
 impl std::fmt::Display for AnalyticsEventType {
@@ -977,8 +1042,25 @@ impl std::fmt::Display for AnalyticsEventType {
             Self::ContractVerified => write!(f, "contract_verified"),
             Self::ContractDeployed => write!(f, "contract_deployed"),
             Self::VersionCreated => write!(f, "version_created"),
+            Self::ContractUpdated => write!(f, "contract_updated"),
+            Self::PublisherCreated => write!(f, "publisher_created"),
         }
     }
+}
+
+/// A simplified entry for the activity feed API
+#[derive(Debug, Clone, Serialize, Deserialize, FromRow)]
+pub struct ActivityFeedEntry {
+    pub id: Uuid,
+    pub event_type: AnalyticsEventType,
+    pub contract_id: Option<Uuid>,
+    pub contract_name: Option<String>,
+    pub contract_stellar_id: Option<String>,
+    pub publisher_id: Option<Uuid>,
+    pub publisher_name: Option<String>,
+    pub network: Option<Network>,
+    pub metadata: serde_json::Value,
+    pub created_at: DateTime<Utc>,
 }
 
 /// A raw analytics event recorded when a contract lifecycle action occurs
@@ -1800,4 +1882,29 @@ pub struct ReleaseNotesResponse {
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
     pub published_at: Option<DateTime<Utc>>,
+}
+
+// ────────────────────────────────────────────────────────────────────────────
+// Contract changelog (release history)
+// ────────────────────────────────────────────────────────────────────────────
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ContractChangelogEntry {
+    pub version: String,
+    pub created_at: DateTime<Utc>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub commit_hash: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub source_url: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub release_notes: Option<String>,
+    pub breaking: bool,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub breaking_changes: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ContractChangelogResponse {
+    pub contract_id: Uuid,
+    pub entries: Vec<ContractChangelogEntry>,
 }

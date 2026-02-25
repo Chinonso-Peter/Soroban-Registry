@@ -1,3 +1,4 @@
+use crate::validation::extractors::ValidatedJson;
 use axum::{
     extract::{
         rejection::{JsonRejection, QueryRejection},
@@ -10,14 +11,17 @@ use axum::{
 use base64::{engine::general_purpose::STANDARD as BASE64, Engine as _};
 use ed25519_dalek::{Signature, Verifier, VerifyingKey};
 use serde_json::{json, Value};
-use std::time::Duration;
 use shared::{
-    Contract, ContractAnalyticsResponse, ContractGetResponse, ContractInteractionResponse,
+    pagination::Cursor, AnalyticsEventType, ChangePublisherRequest, Contract,
+    ContractAnalyticsResponse, ContractGetResponse, ContractInteractionResponse,
     ContractSearchParams, ContractVersion, CreateContractVersionRequest,
     CreateInteractionBatchRequest, CreateInteractionRequest, DeploymentStats,
-    InteractionsListResponse, InteractionsQueryParams, InteractorStats, Network, NetworkConfig,
-    PaginatedResponse, PublishRequest, Publisher, SemVer, TimelineEntry, TopUser,
+    InteractionTimeSeriesPoint, InteractionTimeSeriesResponse, InteractionsListResponse,
+    InteractionsQueryParams, InteractorStats, Network, NetworkConfig, PaginatedResponse,
+    PublishRequest, Publisher, SemVer, TimelineEntry, TopUser, TrendingParams,
+    UpdateContractMetadataRequest, UpdateContractStatusRequest, VerifyRequest,
 };
+use std::time::Duration;
 use uuid::Uuid;
 
 /// Query params for GET /contracts/:id (Issue #43)
@@ -27,6 +31,7 @@ pub struct GetContractQuery {
 }
 
 use crate::{
+    analytics,
     breaking_changes::{diff_abi, has_breaking_changes, resolve_abi},
     dependency,
     error::{ApiError, ApiResult},
@@ -87,28 +92,6 @@ fn default_audit_limit() -> i64 {
     100
 }
 
-#[derive(Debug, serde::Deserialize)]
-pub struct UpdateContractMetadataRequest {
-    pub name: Option<String>,
-    pub description: Option<String>,
-    pub category: Option<String>,
-    pub tags: Option<Vec<String>>,
-    pub user_id: Option<Uuid>,
-}
-
-#[derive(Debug, serde::Deserialize)]
-pub struct ChangePublisherRequest {
-    pub publisher_address: String,
-    pub user_id: Option<Uuid>,
-}
-
-#[derive(Debug, serde::Deserialize)]
-pub struct UpdateContractStatusRequest {
-    pub status: String,
-    pub error_message: Option<String>,
-    pub user_id: Option<Uuid>,
-}
-
 fn extract_ip_address(headers: &HeaderMap) -> String {
     if let Some(forwarded_for) = headers
         .get("x-forwarded-for")
@@ -161,6 +144,104 @@ async fn write_contract_audit_log(
         .await?;
 
     Ok(())
+}
+
+fn parse_interaction_type(
+    interaction_type: Option<&str>,
+    method: Option<&str>,
+) -> Result<String, ApiError> {
+    let mut normalized = interaction_type
+        .map(|v| v.trim().to_ascii_lowercase())
+        .or_else(|| {
+            if method.is_some() {
+                Some("invoke".to_string())
+            } else {
+                None
+            }
+        })
+        .unwrap_or_else(|| "invoke".to_string());
+
+    if normalized == "invocation" {
+        normalized = "invoke".to_string();
+    }
+
+    let valid = matches!(
+        normalized.as_str(),
+        "deploy" | "invoke" | "transfer" | "query" | "publish_success" | "publish_failed"
+    );
+
+    if !valid {
+        return Err(ApiError::bad_request(
+            "InvalidInteractionType",
+            format!(
+                "interaction_type '{}' is invalid; expected one of: deploy, invoke, transfer, query, publish_success, publish_failed",
+                normalized
+            ),
+        ));
+    }
+
+    Ok(normalized)
+}
+
+async fn record_contract_interaction(
+    db: &sqlx::PgPool,
+    contract_id: Uuid,
+    account: Option<&str>,
+    interaction_type: &str,
+    transaction_hash: Option<&str>,
+    method: Option<&str>,
+    parameters: Option<&serde_json::Value>,
+    return_value: Option<&serde_json::Value>,
+    timestamp: chrono::DateTime<chrono::Utc>,
+    network: &Network,
+) -> Result<Uuid, sqlx::Error> {
+    let mut tx = db.begin().await?;
+
+    let interaction_id: Uuid = sqlx::query_scalar(
+        r#"
+        INSERT INTO contract_interactions
+          (
+            contract_id, user_address, interaction_type, transaction_hash, method,
+            parameters, return_value, interaction_timestamp, interaction_count, network, created_at
+          )
+        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, 1, $9, $10)
+        RETURNING id
+        "#,
+    )
+    .bind(contract_id)
+    .bind(account)
+    .bind(interaction_type)
+    .bind(transaction_hash)
+    .bind(method)
+    .bind(parameters)
+    .bind(return_value)
+    .bind(timestamp)
+    .bind(network)
+    .bind(timestamp)
+    .fetch_one(&mut *tx)
+    .await?;
+
+    sqlx::query(
+        r#"
+        INSERT INTO contract_interaction_daily_aggregates
+          (contract_id, interaction_type, network, day, count, updated_at)
+        VALUES ($1, $2, $3, $4, 1, NOW())
+        ON CONFLICT (contract_id, interaction_type, network, day)
+        DO UPDATE SET
+          count = contract_interaction_daily_aggregates.count + 1,
+          updated_at = NOW()
+        "#,
+    )
+    .bind(contract_id)
+    .bind(interaction_type)
+    .bind(network)
+    .bind(timestamp.date_naive())
+    .execute(&mut *tx)
+    .await?;
+
+    tx.commit().await?;
+
+    Ok(interaction_id)
 }
 
 pub async fn health_check(State(state): State<AppState>) -> (StatusCode, Json<Value>) {
@@ -250,9 +331,17 @@ pub async fn list_contracts(
         Err(err) => return map_query_rejection(err).into_response(),
     };
 
-    let page = params.page.unwrap_or(1).max(1);
     let limit = params.limit.unwrap_or(20).clamp(1, 100);
-    let offset = (page - 1).max(0) * limit;
+
+    // Cursor logic
+    let cursor = params.cursor.as_ref().and_then(|c| Cursor::decode(c).ok());
+
+    let (page, offset) = if cursor.is_some() {
+        (1, 0) // Ignore page/offset if cursor is present
+    } else {
+        let p = params.page.unwrap_or(1).max(1);
+        (p, (p - 1).max(0) * limit)
+    };
 
     let sort_by = params.sort_by.clone().unwrap_or_else(|| {
         if params.query.is_some() {
@@ -262,6 +351,8 @@ pub async fn list_contracts(
         }
     });
     let sort_order = params.sort_order.clone().unwrap_or(shared::SortOrder::Desc);
+
+    let is_timestamp_sort = matches!(sort_by, shared::SortBy::CreatedAt);
 
     // Build dynamic query with aggregations
     let mut query = String::from(
@@ -314,6 +405,26 @@ pub async fn list_contracts(
         count_query.push_str(&network_clause);
     }
 
+    // Apply cursor filter if available and sorting by timestamp
+    if let Some(cursor) = cursor {
+        if is_timestamp_sort {
+            let direction_op = if sort_order == shared::SortOrder::Asc {
+                ">"
+            } else {
+                "<"
+            };
+            let cursor_clause = format!(
+                " AND (c.created_at {} '{}' OR (c.created_at = '{}' AND c.id {} '{}'))",
+                direction_op,
+                cursor.timestamp.to_rfc3339(),
+                cursor.timestamp.to_rfc3339(),
+                direction_op,
+                cursor.id
+            );
+            query.push_str(&cursor_clause);
+        }
+    }
+
     query.push_str(" GROUP BY c.id");
 
     // Sorting logic using aggregations in ORDER BY
@@ -359,11 +470,26 @@ pub async fn list_contracts(
         Err(err) => return db_internal_error("count filtered contracts", err).into_response(),
     };
 
-    (
-        StatusCode::OK,
-        Json(PaginatedResponse::new(contracts, total, page, limit)),
-    )
-        .into_response()
+    let mut response = PaginatedResponse::new(contracts, total, page, limit);
+
+    // Generate next cursor if we have full page
+    if response.items.len() >= limit as usize {
+        if let Some(last) = response.items.last() {
+            let next_cursor = Cursor::new(last.created_at, last.id).encode();
+            response.next_cursor = Some(next_cursor);
+        }
+    }
+
+    // Generate prev cursor if we have items and are not on the first page
+    // (Simplification: if we have a cursor, or page > 1)
+    if params.cursor.is_some() || page > 1 {
+        if let Some(first) = response.items.first() {
+            let prev_cursor = Cursor::new(first.created_at, first.id).encode();
+            response.prev_cursor = Some(prev_cursor);
+        }
+    }
+
+    (StatusCode::OK, Json(response)).into_response()
 }
 
 /// Get a specific contract by ID. Optional ?network= returns network-specific config (Issue #43).
@@ -438,13 +564,81 @@ pub async fn get_contract_versions(
     Ok(Json(versions))
 }
 
+/// GET /api/contracts/:id/changelog (and /contracts/:id/changelog) — release history with breaking-change markers.
+pub async fn get_contract_changelog(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+) -> ApiResult<Json<ContractChangelogResponse>> {
+    let (contract_uuid, contract_id) = fetch_contract_identity(&state, &id).await?;
+
+    // Ascending order makes it easy to compute diffs against the previous version.
+    let versions: Vec<ContractVersion> = sqlx::query_as(
+        "SELECT * FROM contract_versions WHERE contract_id = $1 ORDER BY created_at ASC",
+    )
+    .bind(contract_uuid)
+    .fetch_all(&state.db)
+    .await
+    .map_err(|err| db_internal_error("get contract versions for changelog", err))?;
+
+    let mut entries: Vec<ContractChangelogEntry> = Vec::with_capacity(versions.len());
+
+    let mut prev_version: Option<String> = None;
+    for v in &versions {
+        let mut breaking = false;
+        let mut breaking_changes: Vec<String> = Vec::new();
+
+        if let Some(prev) = prev_version.as_deref() {
+            let old_selector = format!("{}@{}", contract_id, prev);
+            let new_selector = format!("{}@{}", contract_id, v.version);
+
+            let old_abi = resolve_abi(&state, &old_selector).await?;
+            let new_abi = resolve_abi(&state, &new_selector).await?;
+
+            let old_spec = crate::type_safety::parser::parse_json_spec(&old_abi, &old_selector)
+                .map_err(|e| {
+                    ApiError::bad_request("InvalidABI", format!("Failed to parse old ABI: {}", e))
+                })?;
+            let new_spec = crate::type_safety::parser::parse_json_spec(&new_abi, &new_selector)
+                .map_err(|e| {
+                    ApiError::bad_request("InvalidABI", format!("Failed to parse new ABI: {}", e))
+                })?;
+
+            let changes = diff_abi(&old_spec, &new_spec);
+            breaking = has_breaking_changes(&changes);
+            breaking_changes = changes
+                .into_iter()
+                .filter(|c| c.severity == crate::breaking_changes::ChangeSeverity::Breaking)
+                .map(|c| c.message)
+                .collect();
+        }
+
+        entries.push(ContractChangelogEntry {
+            version: v.version.clone(),
+            created_at: v.created_at,
+            commit_hash: v.commit_hash.clone(),
+            source_url: v.source_url.clone(),
+            release_notes: v.release_notes.clone(),
+            breaking,
+            breaking_changes,
+        });
+
+        prev_version = Some(v.version.clone());
+    }
+
+    // Most APIs return newest-first for timelines.
+    entries.reverse();
+
+    Ok(Json(ContractChangelogResponse {
+        contract_id: contract_uuid,
+        entries,
+    }))
+}
+
 pub async fn create_contract_version(
     State(state): State<AppState>,
     Path(id): Path<String>,
-    payload: Result<Json<CreateContractVersionRequest>, JsonRejection>,
+    ValidatedJson(req): ValidatedJson<CreateContractVersionRequest>,
 ) -> ApiResult<Json<ContractVersion>> {
-    let Json(req) = payload.map_err(map_json_rejection)?;
-
     let (contract_uuid, contract_id) = fetch_contract_identity(&state, &id).await?;
     if !req.contract_id.trim().is_empty() && req.contract_id != contract_id {
         return Err(ApiError::bad_request(
@@ -648,7 +842,10 @@ pub async fn create_contract_version(
 
     state.cache.invalidate_abi(&contract_id).await;
     state.cache.invalidate_abi(&contract_uuid.to_string()).await;
-    state.cache.invalidate_abi(&format!("{}@{}", contract_id, req.version)).await;
+    state
+        .cache
+        .invalidate_abi(&format!("{}@{}", contract_id, req.version))
+        .await;
 
     // Post-commit dependency analysis
     let detected_deps = dependency::detect_dependencies_from_abi(&req.abi);
@@ -668,6 +865,17 @@ pub async fn create_contract_version(
             .invalidate("system", "global:dependency_graph")
             .await;
     }
+
+    let _ = analytics::record_event(
+        &state.db,
+        AnalyticsEventType::VersionCreated,
+        Some(version_row.contract_id),
+        None, // Version creation usually doesn't need publisher_id explicitly if we have contract_id
+        None,
+        None,
+        Some(json!({ "version": version_row.version })),
+    )
+    .await;
 
     Ok(Json(version_row))
 }
@@ -708,10 +916,8 @@ async fn fetch_contract_identity(state: &AppState, id: &str) -> ApiResult<(Uuid,
 pub async fn publish_contract(
     State(state): State<AppState>,
     headers: HeaderMap,
-    payload: Result<Json<PublishRequest>, JsonRejection>,
+    ValidatedJson(req): ValidatedJson<PublishRequest>,
 ) -> ApiResult<Json<Contract>> {
-    let Json(req) = payload.map_err(map_json_rejection)?;
-
     crate::validation::validate_contract_id(&req.contract_id)
         .map_err(|e| ApiError::bad_request("InvalidContractId", e))?;
 
@@ -824,15 +1030,39 @@ pub async fn publish_contract(
     .await
     .map_err(|err| db_internal_error("write contract_created audit log", err))?;
 
+    record_contract_interaction(
+        &state.db,
+        contract.id,
+        Some(&publisher.stellar_address),
+        "publish_success",
+        None,
+        None,
+        None,
+        None,
+        chrono::Utc::now(),
+        &contract.network,
+    )
+    .await
+    .map_err(|err| db_internal_error("record publish_success interaction", err))?;
+
+    let _ = analytics::record_event(
+        &state.db,
+        AnalyticsEventType::ContractPublished,
+        Some(contract.id),
+        Some(publisher.id),
+        None,
+        Some(&contract.network),
+        Some(json!({ "name": contract.name })),
+    )
+    .await;
+
     Ok(Json(contract))
 }
 
 pub async fn create_publisher(
     State(state): State<AppState>,
-    payload: Result<Json<Publisher>, JsonRejection>,
+    ValidatedJson(publisher): ValidatedJson<Publisher>,
 ) -> ApiResult<Json<Publisher>> {
-    let Json(publisher) = payload.map_err(map_json_rejection)?;
-
     let created: Publisher = sqlx::query_as(
         "INSERT INTO publishers (stellar_address, username, email, github_url, website)
          VALUES ($1, $2, $3, $4, $5)
@@ -846,6 +1076,17 @@ pub async fn create_publisher(
     .fetch_one(&state.db)
     .await
     .map_err(|err| db_internal_error("create publisher", err))?;
+
+    let _ = analytics::record_event(
+        &state.db,
+        AnalyticsEventType::PublisherCreated,
+        None,
+        Some(created.id),
+        None,
+        None,
+        Some(json!({ "stellar_address": created.stellar_address })),
+    )
+    .await;
 
     Ok(Json(created))
 }
@@ -983,7 +1224,7 @@ pub async fn get_contract_analytics(
         )
     })?;
 
-    let _contract: Contract = sqlx::query_as("SELECT id FROM contracts WHERE id = $1")
+    let _contract: Contract = sqlx::query_as("SELECT * FROM contracts WHERE id = $1")
         .bind(contract_uuid)
         .fetch_one(&state.db)
         .await
@@ -1173,17 +1414,115 @@ pub async fn get_impact_analysis(
     }))
 }
 
-pub async fn get_trending_contracts() -> impl IntoResponse {
-    Json(json!({"trending": []}))
+pub async fn get_trending_contracts(
+    State(state): State<AppState>,
+    Query(params): Query<TrendingParams>,
+) -> ApiResult<Json<Value>> {
+    let limit = params.limit.unwrap_or(10).clamp(1, 50);
+    let timeframe = params.timeframe.unwrap_or_else(|| "7d".to_string());
+    let trailing_days = match timeframe.as_str() {
+        "7d" => 7,
+        "30d" => 30,
+        "90d" => 90,
+        _ => {
+            return Err(ApiError::bad_request(
+                "InvalidTimeframe",
+                "timeframe must be one of: 7d, 30d, 90d",
+            ));
+        }
+    };
+
+    let rows: Vec<(Uuid, String, String, Network, i64, i64)> = sqlx::query_as(
+        r#"
+        WITH scored AS (
+            SELECT
+                c.id,
+                c.contract_id,
+                c.name,
+                c.network,
+                COALESCE(
+                    SUM(a.count) FILTER (WHERE a.day >= CURRENT_DATE - INTERVAL '6 days'),
+                    0
+                )::bigint AS interactions_this_week,
+                COALESCE(
+                    SUM(a.count) FILTER (
+                        WHERE a.day >= CURRENT_DATE - INTERVAL '13 days'
+                          AND a.day < CURRENT_DATE - INTERVAL '6 days'
+                    ),
+                    0
+                )::bigint AS interactions_last_week
+            FROM contracts c
+            LEFT JOIN contract_interaction_daily_aggregates a
+              ON a.contract_id = c.id
+             AND a.day >= CURRENT_DATE - make_interval(days => $1)
+            GROUP BY c.id, c.contract_id, c.name, c.network
+        )
+        SELECT
+            id,
+            contract_id,
+            name,
+            network,
+            interactions_this_week,
+            interactions_last_week
+        FROM scored
+        WHERE interactions_this_week > interactions_last_week * 1.5
+        ORDER BY
+            CASE
+                WHEN interactions_last_week = 0 THEN interactions_this_week::numeric
+                ELSE interactions_this_week::numeric / interactions_last_week::numeric
+            END DESC,
+            interactions_this_week DESC
+        LIMIT $2
+        "#,
+    )
+    .bind(trailing_days)
+    .bind(limit)
+    .fetch_all(&state.db)
+    .await
+    .map_err(|err| db_internal_error("fetch trending contracts", err))?;
+
+    let trending: Vec<Value> = rows
+        .into_iter()
+        .map(
+            |(id, contract_id, name, network, interactions_this_week, interactions_last_week)| {
+                let ratio = if interactions_last_week == 0 {
+                    if interactions_this_week > 0 {
+                        serde_json::Value::String("inf".to_string())
+                    } else {
+                        serde_json::Value::from(0.0)
+                    }
+                } else {
+                    serde_json::Value::from(
+                        interactions_this_week as f64 / interactions_last_week as f64,
+                    )
+                };
+
+                json!({
+                    "id": id,
+                    "contract_id": contract_id,
+                    "name": name,
+                    "network": network,
+                    "interactions_this_week": interactions_this_week,
+                    "interactions_last_week": interactions_last_week,
+                    "ratio": ratio,
+                    "is_trending": true
+                })
+            },
+        )
+        .collect();
+
+    Ok(Json(json!({
+        "timeframe": timeframe,
+        "limit": limit,
+        "trending": trending
+    })))
 }
 
 pub async fn verify_contract(
     State(state): State<AppState>,
     headers: HeaderMap,
-    payload: Result<Json<shared::VerifyRequest>, JsonRejection>,
+    ValidatedJson(req): ValidatedJson<VerifyRequest>,
 ) -> ApiResult<Json<Value>> {
-    let Json(req) = payload.map_err(map_json_rejection)?;
-
     let contract: Contract = sqlx::query_as(
         "SELECT * FROM contracts WHERE contract_id = $1 ORDER BY created_at DESC LIMIT 1",
     )
@@ -1208,7 +1547,7 @@ pub async fn verify_contract(
 
     let verification_id: Uuid = sqlx::query_scalar(
         "INSERT INTO verifications (contract_id, status, source_code, build_params, compiler_version, verified_at, error_message)
-         VALUES ($1, 'verified', $2, $3, $4, NOW(), NULL)
+         VALUES ($1, 'pending', $2, $3, $4, NULL, NULL)
          RETURNING id",
     )
     .bind(contract.id)
@@ -1219,63 +1558,240 @@ pub async fn verify_contract(
     .await
     .map_err(|err| db_internal_error("insert verification record", err))?;
 
-    sqlx::query("UPDATE contracts SET is_verified = true, updated_at = NOW() WHERE id = $1")
-        .bind(contract.id)
-        .execute(&state.db)
-        .await
-        .map_err(|err| db_internal_error("mark contract verified", err))?;
+    let verification_result = verifier::verify_contract(
+        &req.source_code,
+        &contract.wasm_hash,
+        Some(&req.compiler_version),
+        Some(&req.build_params),
+    )
+    .await;
 
     let ip_address = extract_ip_address(&headers);
-    let verification_changes = json!({
-        "verification_id": { "before": Value::Null, "after": verification_id },
-        "status": { "before": Value::Null, "after": "verified" },
-        "compiler_version": { "before": Value::Null, "after": req.compiler_version },
-        "verified_at": { "before": Value::Null, "after": chrono::Utc::now() }
-    });
+    let before_status = previous_status.unwrap_or_else(|| "pending".to_string());
 
-    write_contract_audit_log(
+    match verification_result {
+        Ok(result) if result.verified => {
+            sqlx::query(
+                "UPDATE verifications
+                 SET status = 'verified', verified_at = NOW(), error_message = NULL
+                 WHERE id = $1",
+            )
+            .bind(verification_id)
+            .execute(&state.db)
+            .await
+            .map_err(|err| db_internal_error("mark verification as verified", err))?;
+
+            sqlx::query(
+                "UPDATE contracts SET is_verified = true, updated_at = NOW() WHERE id = $1",
+            )
+            .bind(contract.id)
+            .execute(&state.db)
+            .await
+            .map_err(|err| db_internal_error("mark contract verified", err))?;
+
+            let verification_changes = json!({
+                "verification_id": { "before": Value::Null, "after": verification_id },
+                "status": { "before": Value::Null, "after": "verified" },
+                "compiler_version": { "before": Value::Null, "after": req.compiler_version },
+                "verified_at": { "before": Value::Null, "after": chrono::Utc::now() },
+                "compiled_wasm_hash": { "before": Value::Null, "after": result.compiled_wasm_hash },
+                "deployed_wasm_hash": { "before": Value::Null, "after": result.deployed_wasm_hash }
+            });
+
+            write_contract_audit_log(
+                &state.db,
+                ContractAuditEventType::VerificationAdded,
+                contract.id,
+                contract.publisher_id,
+                verification_changes,
+                &ip_address,
+            )
+            .await
+            .map_err(|err| db_internal_error("write verification_added audit log", err))?;
+
+            if before_status != "verified" {
+                let status_changes = json!({
+                    "status": { "before": before_status, "after": "verified" },
+                    "is_verified": { "before": contract.is_verified, "after": true }
+                });
+                write_contract_audit_log(
+                    &state.db,
+                    ContractAuditEventType::StatusChanged,
+                    contract.id,
+                    contract.publisher_id,
+                    status_changes,
+                    &ip_address,
+                )
+                .await
+                .map_err(|err| db_internal_error("write status_changed audit log", err))?;
+            }
+
+    record_contract_interaction(
         &state.db,
-        ContractAuditEventType::VerificationAdded,
         contract.id,
-        contract.publisher_id,
-        verification_changes,
-        &ip_address,
+        None,
+        "publish_success",
+        None,
+        Some("verify"),
+        None,
+        None,
+        chrono::Utc::now(),
+        &contract.network,
     )
     .await
-    .map_err(|err| db_internal_error("write verification_added audit log", err))?;
+    .map_err(|err| db_internal_error("record verification interaction", err))?;
 
-    let before_status = previous_status.unwrap_or_else(|| "pending".to_string());
-    if before_status != "verified" {
-        let status_changes = json!({
-            "status": { "before": before_status, "after": "verified" },
-            "is_verified": { "before": contract.is_verified, "after": true }
-        });
-        write_contract_audit_log(
-            &state.db,
-            ContractAuditEventType::StatusChanged,
-            contract.id,
-            contract.publisher_id,
-            status_changes,
-            &ip_address,
-        )
-        .await
-        .map_err(|err| db_internal_error("write status_changed audit log", err))?;
+    let _ = analytics::record_event(
+        &state.db,
+        AnalyticsEventType::ContractVerified,
+        Some(contract.id),
+        Some(contract.publisher_id),
+        None,
+        Some(&contract.network),
+        Some(json!({ "verification_id": verification_id })),
+    )
+    .await;
+            let _ = analytics::record_event(
+                &state.db,
+                AnalyticsEventType::ContractVerified,
+                Some(contract.id),
+                Some(contract.publisher_id),
+                None,
+                Some(&contract.network),
+                Some(json!({ "verification_id": verification_id })),
+            )
+            .await;
+
+            Ok(Json(json!({
+                "verified": true,
+                "status": "verified",
+                "verification_id": verification_id,
+                "contract_id": contract.id,
+                "compiled_wasm_hash": result.compiled_wasm_hash,
+                "deployed_wasm_hash": result.deployed_wasm_hash
+            })))
+        }
+        Ok(result) => {
+            let failure_message = result
+                .message
+                .unwrap_or_else(|| "Verification failed due to bytecode mismatch".to_string());
+
+            sqlx::query(
+                "UPDATE verifications
+                 SET status = 'failed', verified_at = NULL, error_message = $2
+                 WHERE id = $1",
+            )
+            .bind(verification_id)
+            .bind(&failure_message)
+            .execute(&state.db)
+            .await
+            .map_err(|err| db_internal_error("mark verification as failed", err))?;
+
+            let verification_changes = json!({
+                "verification_id": { "before": Value::Null, "after": verification_id },
+                "status": { "before": Value::Null, "after": "failed" },
+                "compiler_version": { "before": Value::Null, "after": req.compiler_version },
+                "error_message": { "before": Value::Null, "after": failure_message },
+                "compiled_wasm_hash": { "before": Value::Null, "after": result.compiled_wasm_hash },
+                "deployed_wasm_hash": { "before": Value::Null, "after": result.deployed_wasm_hash }
+            });
+            write_contract_audit_log(
+                &state.db,
+                ContractAuditEventType::VerificationAdded,
+                contract.id,
+                contract.publisher_id,
+                verification_changes,
+                &ip_address,
+            )
+            .await
+            .map_err(|err| db_internal_error("write failed verification audit log", err))?;
+
+            if before_status != "failed" {
+                let status_changes = json!({
+                    "status": { "before": before_status, "after": "failed" },
+                    "is_verified": { "before": contract.is_verified, "after": contract.is_verified }
+                });
+                write_contract_audit_log(
+                    &state.db,
+                    ContractAuditEventType::StatusChanged,
+                    contract.id,
+                    contract.publisher_id,
+                    status_changes,
+                    &ip_address,
+                )
+                .await
+                .map_err(|err| db_internal_error("write failed status audit log", err))?;
+            }
+
+            Err(ApiError::unprocessable(
+                "VerificationFailed",
+                failure_message,
+            ))
+        }
+        Err(err) => {
+            let failure_message = err.to_string();
+
+            sqlx::query(
+                "UPDATE verifications
+                 SET status = 'failed', verified_at = NULL, error_message = $2
+                 WHERE id = $1",
+            )
+            .bind(verification_id)
+            .bind(&failure_message)
+            .execute(&state.db)
+            .await
+            .map_err(|db_err| db_internal_error("persist verifier error", db_err))?;
+
+            let verification_changes = json!({
+                "verification_id": { "before": Value::Null, "after": verification_id },
+                "status": { "before": Value::Null, "after": "failed" },
+                "compiler_version": { "before": Value::Null, "after": req.compiler_version },
+                "error_message": { "before": Value::Null, "after": failure_message }
+            });
+            write_contract_audit_log(
+                &state.db,
+                ContractAuditEventType::VerificationAdded,
+                contract.id,
+                contract.publisher_id,
+                verification_changes,
+                &ip_address,
+            )
+            .await
+            .map_err(|db_err| db_internal_error("write verifier error audit log", db_err))?;
+
+            if before_status != "failed" {
+                let status_changes = json!({
+                    "status": { "before": before_status, "after": "failed" },
+                    "is_verified": { "before": contract.is_verified, "after": contract.is_verified }
+                });
+                write_contract_audit_log(
+                    &state.db,
+                    ContractAuditEventType::StatusChanged,
+                    contract.id,
+                    contract.publisher_id,
+                    status_changes,
+                    &ip_address,
+                )
+                .await
+                .map_err(|db_err| {
+                    db_internal_error("write verifier error status audit log", db_err)
+                })?;
+            }
+
+            Err(ApiError::unprocessable(
+                "VerificationFailed",
+                failure_message,
+            ))
+        }
     }
-
-    Ok(Json(json!({
-        "verified": true,
-        "verification_id": verification_id,
-        "contract_id": contract.id
-    })))
 }
 
 pub async fn update_contract_metadata(
     State(state): State<AppState>,
     Path(id): Path<String>,
     headers: HeaderMap,
-    payload: Result<Json<UpdateContractMetadataRequest>, JsonRejection>,
+    ValidatedJson(req): ValidatedJson<UpdateContractMetadataRequest>,
 ) -> ApiResult<Json<Contract>> {
-    let Json(req) = payload.map_err(map_json_rejection)?;
     if req.name.is_none()
         && req.description.is_none()
         && req.category.is_none()
@@ -1357,11 +1873,22 @@ pub async fn update_contract_metadata(
             ContractAuditEventType::MetadataUpdated,
             after.id,
             req.user_id.unwrap_or(before.publisher_id),
-            Value::Object(changes),
+            Value::Object(changes.clone()),
             &extract_ip_address(&headers),
         )
         .await
         .map_err(|err| db_internal_error("write metadata_updated audit log", err))?;
+
+        let _ = analytics::record_event(
+            &state.db,
+            AnalyticsEventType::ContractUpdated,
+            Some(after.id),
+            Some(after.publisher_id),
+            None,
+            Some(&after.network),
+            Some(json!({ "changes": changes })),
+        )
+        .await;
     }
 
     Ok(Json(after))
@@ -1371,9 +1898,8 @@ pub async fn change_contract_publisher(
     State(state): State<AppState>,
     Path(id): Path<String>,
     headers: HeaderMap,
-    payload: Result<Json<ChangePublisherRequest>, JsonRejection>,
+    ValidatedJson(req): ValidatedJson<ChangePublisherRequest>,
 ) -> ApiResult<Json<Contract>> {
-    let Json(req) = payload.map_err(map_json_rejection)?;
     let contract_uuid = Uuid::parse_str(&id).map_err(|_| {
         ApiError::bad_request(
             "InvalidContractId",
@@ -1448,9 +1974,8 @@ pub async fn update_contract_status(
     State(state): State<AppState>,
     Path(id): Path<String>,
     headers: HeaderMap,
-    payload: Result<Json<UpdateContractStatusRequest>, JsonRejection>,
+    ValidatedJson(req): ValidatedJson<UpdateContractStatusRequest>,
 ) -> ApiResult<Json<Value>> {
-    let Json(req) = payload.map_err(map_json_rejection)?;
     let normalized_status = req.status.to_ascii_lowercase();
     if normalized_status != "pending"
         && normalized_status != "verified"
@@ -1535,6 +2060,29 @@ pub async fn update_contract_status(
         .map_err(|err| db_internal_error("write status_changed audit log", err))?;
     }
 
+    if normalized_status == "verified" || normalized_status == "failed" {
+        let interaction_type = if normalized_status == "verified" {
+            "publish_success"
+        } else {
+            "publish_failed"
+        };
+
+        record_contract_interaction(
+            &state.db,
+            contract_uuid,
+            None,
+            interaction_type,
+            None,
+            Some("status_update"),
+            None,
+            None,
+            chrono::Utc::now(),
+            &contract.network,
+        )
+        .await
+        .map_err(|err| db_internal_error("record status interaction", err))?;
+    }
+
     Ok(Json(json!({
         "contract_id": contract_uuid,
         "verification_id": verification_id,
@@ -1557,7 +2105,7 @@ pub async fn get_contract_audit_log(
     let limit = params.limit.clamp(1, 500);
     let offset = params.offset.max(0);
 
-    let _contract: Contract = sqlx::query_as("SELECT id FROM contracts WHERE id = $1")
+    let contract: Contract = sqlx::query_as("SELECT * FROM contracts WHERE id = $1")
         .bind(contract_uuid)
         .fetch_one(&state.db)
         .await
@@ -1638,7 +2186,7 @@ pub async fn get_contract_interactions(
     State(state): State<AppState>,
     Path(id): Path<String>,
     Query(params): Query<InteractionsQueryParams>,
-) -> ApiResult<Json<InteractionsListResponse>> {
+) -> ApiResult<Json<Value>> {
     let contract_uuid = Uuid::parse_str(&id).map_err(|_| {
         ApiError::bad_request(
             "InvalidContractId",
@@ -1646,7 +2194,7 @@ pub async fn get_contract_interactions(
         )
     })?;
 
-    let _contract: Contract = sqlx::query_as("SELECT id FROM contracts WHERE id = $1")
+    let contract: Contract = sqlx::query_as("SELECT * FROM contracts WHERE id = $1")
         .bind(contract_uuid)
         .fetch_one(&state.db)
         .await
@@ -1658,8 +2206,85 @@ pub async fn get_contract_interactions(
             _ => db_internal_error("get contract for interactions", err),
         })?;
 
+    if let Some(days) = params.days {
+        let days = days.clamp(1, 365);
+
+        let series_rows: Vec<(chrono::NaiveDate, String, i64)> = sqlx::query_as(
+            r#"
+            SELECT day, interaction_type, SUM(count)::bigint AS count
+            FROM contract_interaction_daily_aggregates
+            WHERE contract_id = $1
+              AND day >= CURRENT_DATE - ($2::int - 1)
+              AND ($3::text IS NULL OR interaction_type = $3)
+              AND ($4::network_type IS NULL OR network = $4)
+            GROUP BY day, interaction_type
+            ORDER BY day ASC, interaction_type ASC
+            "#,
+        )
+        .bind(contract_uuid)
+        .bind(days as i32)
+        .bind(params.interaction_type.as_deref())
+        .bind(params.network.as_ref())
+        .fetch_all(&state.db)
+        .await
+        .map_err(|err| db_internal_error("fetch interaction time series", err))?;
+
+        let (interactions_this_week, interactions_last_week): (i64, i64) = sqlx::query_as(
+            r#"
+            SELECT
+                COALESCE(
+                    SUM(count) FILTER (WHERE day >= CURRENT_DATE - INTERVAL '6 days'),
+                    0
+                )::bigint AS interactions_this_week,
+                COALESCE(
+                    SUM(count) FILTER (
+                        WHERE day >= CURRENT_DATE - INTERVAL '13 days'
+                          AND day < CURRENT_DATE - INTERVAL '6 days'
+                    ),
+                    0
+                )::bigint AS interactions_last_week
+            FROM contract_interaction_daily_aggregates
+            WHERE contract_id = $1
+              AND ($2::text IS NULL OR interaction_type = $2)
+              AND ($3::network_type IS NULL OR network = $3)
+            "#,
+        )
+        .bind(contract_uuid)
+        .bind(params.interaction_type.as_deref())
+        .bind(params.network.as_ref())
+        .fetch_one(&state.db)
+        .await
+        .map_err(|err| db_internal_error("fetch weekly interaction trend", err))?;
+
+        let response = InteractionTimeSeriesResponse {
+            contract_id: contract.id,
+            days,
+            interactions_this_week,
+            interactions_last_week,
+            is_trending: (interactions_this_week as f64) > (interactions_last_week as f64 * 1.5),
+            series: series_rows
+                .into_iter()
+                .map(|(date, interaction_type, count)| InteractionTimeSeriesPoint {
+                    date,
+                    interaction_type,
+                    count,
+                })
+                .collect(),
+        };
+
+        return Ok(Json(json!(response)));
+    }
+
     let limit = params.limit.clamp(1, 100);
-    let offset = params.offset.max(0);
+
+    // Cursor logic
+    let cursor = params.cursor.as_ref().and_then(|c| Cursor::decode(c).ok());
+
+    let offset = if cursor.is_some() {
+        0
+    } else {
+        params.offset.max(0)
+    };
 
     let from_ts = params
         .from_timestamp
@@ -1675,15 +2300,19 @@ pub async fn get_contract_interactions(
     let rows: Vec<shared::ContractInteraction> = sqlx::query_as(
         r#"
         SELECT id, contract_id, user_address, interaction_type, transaction_hash,
-               method, parameters, return_value, created_at
+               method, parameters, return_value, interaction_timestamp, interaction_count, network, created_at
         FROM contract_interactions
         WHERE contract_id = $1
           AND ($2::text IS NULL OR user_address = $2)
           AND ($3::text IS NULL OR method = $3)
           AND ($4::timestamptz IS NULL OR created_at >= $4)
           AND ($5::timestamptz IS NULL OR created_at <= $5)
-        ORDER BY created_at DESC
-        LIMIT $6 OFFSET $7
+          AND ($6::text IS NULL OR interaction_type = $6)
+          AND ($7::network_type IS NULL OR network = $7)
+          -- Cursor logic: tie-break with id
+          AND ($8::timestamptz IS NULL OR (created_at < $8 OR (created_at = $8 AND id < $9)))
+        ORDER BY created_at DESC, id DESC
+        LIMIT $10 OFFSET $11
         "#,
     )
     .bind(contract_uuid)
@@ -1691,6 +2320,10 @@ pub async fn get_contract_interactions(
     .bind(params.method.as_deref())
     .bind(from_ts)
     .bind(to_ts)
+    .bind(params.interaction_type.as_deref())
+    .bind(params.network.as_ref())
+    .bind(cursor.as_ref().map(|c| c.timestamp))
+    .bind(cursor.as_ref().map(|c| c.id))
     .bind(limit)
     .bind(offset)
     .fetch_all(&state.db)
@@ -1705,6 +2338,8 @@ pub async fn get_contract_interactions(
           AND ($3::text IS NULL OR method = $3)
           AND ($4::timestamptz IS NULL OR created_at >= $4)
           AND ($5::timestamptz IS NULL OR created_at <= $5)
+          AND ($6::text IS NULL OR interaction_type = $6)
+          AND ($7::network_type IS NULL OR network = $7)
         "#,
     )
     .bind(contract_uuid)
@@ -1712,6 +2347,8 @@ pub async fn get_contract_interactions(
     .bind(params.method.as_deref())
     .bind(from_ts)
     .bind(to_ts)
+    .bind(params.interaction_type.as_deref())
+    .bind(params.network.as_ref())
     .fetch_one(&state.db)
     .await
     .map_err(|err| db_internal_error("count contract interactions", err))?;
@@ -1729,11 +2366,28 @@ pub async fn get_contract_interactions(
         })
         .collect();
 
+    let next_cursor = if items.len() >= limit as usize {
+        items
+            .last()
+            .map(|last| Cursor::new(last.created_at, last.id).encode())
+    } else {
+        None
+    };
+    let prev_cursor = if params.cursor.is_some() || offset > 0 {
+        items
+            .first()
+            .map(|first| Cursor::new(first.created_at, first.id).encode())
+    } else {
+        None
+    };
+
     Ok(Json(InteractionsListResponse {
         items,
         total,
         limit,
         offset,
+        next_cursor,
+        prev_cursor,
     }))
 }
 
@@ -1741,10 +2395,8 @@ pub async fn get_contract_interactions(
 pub async fn post_contract_interaction(
     State(state): State<AppState>,
     Path(id): Path<String>,
-    payload: Result<Json<CreateInteractionRequest>, JsonRejection>,
+    ValidatedJson(req): ValidatedJson<CreateInteractionRequest>,
 ) -> ApiResult<(StatusCode, Json<serde_json::Value>)> {
-    let Json(req) = payload.map_err(map_json_rejection)?;
-
     let contract_uuid = Uuid::parse_str(&id).map_err(|_| {
         ApiError::bad_request(
             "InvalidContractId",
@@ -1752,7 +2404,7 @@ pub async fn post_contract_interaction(
         )
     })?;
 
-    let _contract: Contract = sqlx::query_as("SELECT id FROM contracts WHERE id = $1")
+    let contract: Contract = sqlx::query_as("SELECT * FROM contracts WHERE id = $1")
         .bind(contract_uuid)
         .fetch_one(&state.db)
         .await
@@ -1764,38 +2416,34 @@ pub async fn post_contract_interaction(
             _ => db_internal_error("get contract for interaction", err),
         })?;
 
-    let interaction_type = req.method.as_deref().unwrap_or("invocation");
+    let interaction_type =
+        parse_interaction_type(req.interaction_type.as_deref(), req.method.as_deref())?;
     let created_at = req.timestamp.unwrap_or_else(chrono::Utc::now);
-
-    let row: (Uuid,) = sqlx::query_as(
-        r#"
-        INSERT INTO contract_interactions
-          (contract_id, user_address, interaction_type, transaction_hash, method, parameters, return_value, created_at)
-        VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
-        RETURNING id
-        "#,
+    let network = req.network.unwrap_or_else(|| contract.network.clone());
+    let interaction_id = record_contract_interaction(
+        &state.db,
+        contract_uuid,
+        req.account.as_deref(),
+        &interaction_type,
+        req.transaction_hash.as_deref(),
+        req.method.as_deref(),
+        req.parameters.as_ref(),
+        req.return_value.as_ref(),
+        created_at,
+        &network,
     )
-    .bind(contract_uuid)
-    .bind(req.account.as_deref())
-    .bind(interaction_type)
-    .bind(req.transaction_hash.as_deref())
-    .bind(req.method.as_deref())
-    .bind(req.parameters.as_ref())
-    .bind(req.return_value.as_ref())
-    .bind(created_at)
-    .fetch_one(&state.db)
     .await
     .map_err(|err| db_internal_error("insert contract interaction", err))?;
 
     tracing::info!(
         contract_id = %id,
-        interaction_id = %row.0,
+        interaction_id = %interaction_id,
         "contract interaction logged"
     );
 
     Ok((
         StatusCode::CREATED,
-        Json(serde_json::json!({ "id": row.0 })),
+        Json(serde_json::json!({ "id": interaction_id })),
     ))
 }
 
@@ -1803,10 +2451,8 @@ pub async fn post_contract_interaction(
 pub async fn post_contract_interactions_batch(
     State(state): State<AppState>,
     Path(id): Path<String>,
-    payload: Result<Json<CreateInteractionBatchRequest>, JsonRejection>,
+    ValidatedJson(req): ValidatedJson<CreateInteractionBatchRequest>,
 ) -> ApiResult<(StatusCode, Json<serde_json::Value>)> {
-    let Json(req) = payload.map_err(map_json_rejection)?;
-
     let contract_uuid = Uuid::parse_str(&id).map_err(|_| {
         ApiError::bad_request(
             "InvalidContractId",
@@ -1814,7 +2460,7 @@ pub async fn post_contract_interactions_batch(
         )
     })?;
 
-    let _contract: Contract = sqlx::query_as("SELECT id FROM contracts WHERE id = $1")
+    let contract: Contract = sqlx::query_as("SELECT * FROM contracts WHERE id = $1")
         .bind(contract_uuid)
         .fetch_one(&state.db)
         .await
@@ -1828,28 +2474,25 @@ pub async fn post_contract_interactions_batch(
 
     let mut ids = Vec::with_capacity(req.interactions.len());
     for i in &req.interactions {
-        let interaction_type = i.method.as_deref().unwrap_or("invocation");
+        let interaction_type =
+            parse_interaction_type(i.interaction_type.as_deref(), i.method.as_deref())?;
         let created_at = i.timestamp.unwrap_or_else(chrono::Utc::now);
-        let row: (Uuid,) = sqlx::query_as(
-            r#"
-            INSERT INTO contract_interactions
-              (contract_id, user_address, interaction_type, transaction_hash, method, parameters, return_value, created_at)
-            VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
-            RETURNING id
-            "#,
+        let network = i.network.clone().unwrap_or_else(|| contract.network.clone());
+        let interaction_id = record_contract_interaction(
+            &state.db,
+            contract_uuid,
+            i.account.as_deref(),
+            &interaction_type,
+            i.transaction_hash.as_deref(),
+            i.method.as_deref(),
+            i.parameters.as_ref(),
+            i.return_value.as_ref(),
+            created_at,
+            &network,
         )
-        .bind(contract_uuid)
-        .bind(i.account.as_deref())
-        .bind(interaction_type)
-        .bind(i.transaction_hash.as_deref())
-        .bind(i.method.as_deref())
-        .bind(i.parameters.as_ref())
-        .bind(i.return_value.as_ref())
-        .bind(created_at)
-        .fetch_one(&state.db)
         .await
         .map_err(|err| db_internal_error("insert contract interaction batch", err))?;
-        ids.push(row.0);
+        ids.push(interaction_id);
     }
 
     tracing::info!(

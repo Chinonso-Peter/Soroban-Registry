@@ -1,9 +1,11 @@
-// Example Soroban contract with various linting issues for demonstration
-// Vulnerability note: missing require_auth allows anyone to transfer from any account.
-use soroban_sdk::{contract, contractimpl, Env, Address, Symbol, symbol_short};
+//! WARNING: This example intentionally demonstrates an anti-pattern.
+//! Hardcoded string storage keys can collide silently and corrupt state.
+//! See `examples/token_fixed.rs` for the recommended typed-key approach.
 
-const STORAGE_KEY_BALANCE: &str = "balance";  // Potential storage key collision
-// i removed const STORAGE_KEY_BALANCE: &str = "balance"; because the duplicate key was a compile error.
+use soroban_sdk::{contract, contractimpl, Address, Env, Symbol};
+
+const STORAGE_KEY_BALANCE: &str = "balance";
+const STORAGE_KEY_ALLOWANCE: &str = "balance";  // Intentional collision with STORAGE_KEY_BALANCE to demonstrate the anti-pattern
 
 
 /// Maximum number of iterations allowed in the mint function.
@@ -11,61 +13,31 @@ const STORAGE_KEY_BALANCE: &str = "balance";  // Potential storage key collision
 /// Soroban contracts are subject to strict CPU instruction limits per transaction.
 const MAX_MINT_ITERATIONS: u64 = 1_000;
 
-pub struct TokenContract;
+#[contract]
+pub struct TokenWithIssues;
 
 #[contractimpl]
-impl TokenContract {
-    /// Transfer tokens with auth check (secure version)
-    pub fn transfer(env: Env, from: Address, to: Address, amount: i128) -> Result<(), String> {
-        from.require_auth();
-        
-        let current_balance = env.storage()
+impl TokenWithIssues {
+    /// WARNING: anti-pattern for demonstration only.
+    /// This writes to a global hardcoded key and does not namespace by account.
+    pub fn set_balance(env: Env, owner: Address, amount: i128) {
+        owner.require_auth();
+        env.storage()
             .persistent()
-            .get::<_, i128>(&Symbol::new(&env, "balance"))
-            .unwrap_or(0);  // Issue: unwrap in public function
-        
-        if current_balance < amount {
-            panic!("Insufficient balance");  // Issue: panic in contract
-        }
-        
-        let new_balance = current_balance + amount;  // Issue: unchecked arithmetic
-        env.storage().persistent().set(&Symbol::new(&env, "balance"), &new_balance);
-        
-        Ok(())
+            .set(&Symbol::new(&env, STORAGE_KEY_BALANCE), &amount);
     }
 
-    /// Transfer tokens without auth check (vulnerable version for comparison)
-    pub fn transfer_vulnerable(env: Env, from: Address, to: Address, amount: i128) -> Result<(), String> {
-        // Missing auth check - should call env.require_auth(&from)
-
-        let current_balance = env.storage()
+    /// WARNING: anti-pattern for demonstration only.
+    /// This uses a different logical concept but the same raw key value as `set_balance`.
+    pub fn set_allowance(env: Env, owner: Address, spender: Address, amount: i128) {
+        owner.require_auth();
+        let _ = spender;
+        env.storage()
             .persistent()
-            .get::<_, i128>(&Symbol::new(&env, "balance"))
-            .unwrap_or(0);
-
-        if current_balance < amount {
-            panic!("Insufficient balance");
-        }
-
-        let new_balance = current_balance + amount;
-        env.storage().persistent().set(&Symbol::new(&env, "balance"), &new_balance);
-
-        Ok(())
+            .set(&Symbol::new(&env, STORAGE_KEY_ALLOWANCE), &amount);
     }
-    
-    /// Approve tokens with hardcoded address
-    pub fn approve(env: Env, owner: Address) {
-        let admin = "GBBD47UZQ5CZKRQFWWXD4ZCSWI5GGMOWYCFTEUQMDFEBNFNJ5VQJEWWV";  // Issue: hardcoded address
-        
-        env.storage().persistent().remove(&Symbol::new(&env, "allowance"));  // Issue: direct storage clear
-        
-        let unused_var = 42;  // Issue: unused variable
-        
-        Ok(())
-    }
-    
-    /// Get balance without documentation
-    pub fn get_balance(env: Env, account: Address) -> i128 {
+
+    pub fn get_balance(env: Env) -> i128 {
         env.storage()
             .persistent()
             .get::<_, i128>(&Symbol::new(&env, "balance"))
@@ -118,42 +90,19 @@ impl TokenContract {
             counter += 1;
         }
     }
-    
-    /// Transfer tokens with reentrancy protection (checks-effects-interactions + guard)
-    pub fn send(env: Env, to: Address, amount: i128) {
-        let balance_key = Symbol::new(&env, "balance");
-        let guard_key = Symbol::new(&env, "reentrancy_guard");
 
-        let guard_active = env.storage().persistent().get::<_, bool>(&guard_key).unwrap_or(false);
-        if guard_active {
-            panic!("Reentrancy detected");
-        }
-
-        // Effects before interactions
-        let current = env.storage().persistent().get::<_, i128>(&balance_key).unwrap_or(0);
-        env.storage().persistent().set(&balance_key, &(current - amount));
-
-        // Guard during external call
-        env.storage().persistent().set(&guard_key, &true);
-        env.invoke_contract::<_, ()>(&to, &Symbol::new(&env, "receive"), (amount,));
-        env.storage().persistent().set(&guard_key, &false);
-    }
-
-    /// Vulnerable send for comparison (reentrancy risk)
-    pub fn send_vulnerable(env: Env, to: Address, amount: i128) {
-        env.invoke_contract::<_, ()>(&to, &Symbol::new(&env, "receive"), (amount,));
-
-        let balance_key = Symbol::new(&env, "balance");
-        let current = env.storage().persistent().get::<_, i128>(&balance_key).unwrap_or(0);
-        env.storage().persistent().set(&balance_key, &(current - amount));
-    }
-    
-    /// Inefficient clone usage
-    pub fn process(env: Env, data: String) -> String {
-        data.clone().clone()  // Issue: redundant clone
+    pub fn get_allowance(env: Env) -> i128 {
+        env.storage()
+            .persistent()
+            .get::<_, i128>(&Symbol::new(&env, STORAGE_KEY_ALLOWANCE))
+            .unwrap_or(0)
     }
 }
 
+#[cfg(test)]
+mod tests {
+    use super::TokenWithIssues;
+    use soroban_sdk::{testutils::Address as _, Address, Env};
 
 
 #[test]
@@ -170,14 +119,14 @@ fn test_transfer() {
 fn test_mint_valid_amount() {
     let env = Env::new();
     // amount = 10, well within the MAX_MINT_ITERATIONS limit
-    TokenContract::mint(env, 10);
+    TokenWithIssues::mint(env, 10);
 }
 
 /// Verifies that minting with the exact MAX_MINT_ITERATIONS amount completes successfully without panicking.
 #[test]
 fn test_mint_exact_limit() {
     let env = Env::new();
-    TokenContract::mint(env, MAX_MINT_ITERATIONS);
+    TokenWithIssues::mint(env, MAX_MINT_ITERATIONS);
 }
 
 /// Mint with amount = 0 must panic (invalid input).
@@ -185,55 +134,49 @@ fn test_mint_exact_limit() {
 #[should_panic(expected = "amount must be greater than zero")]
 fn test_mint_zero_amount() {
     let env = Env::new();
-    TokenContract::mint(env, 0);
+    TokenWithIssues::mint(env, 0);
 }
 
 #[test]
 #[should_panic(expected = "amount exceeds maximum allowed iterations")]
 fn test_mint_exceeds_limit() {
     let env = Env::new();
-    TokenContract::mint(env, MAX_MINT_ITERATIONS + 1);
+    TokenWithIssues::mint(env, MAX_MINT_ITERATIONS + 1);
 }
 
 #[test]
-#[should_panic]
-fn test_reentrancy_guard_blocks_recursive_call() {
-    use soroban_sdk::testutils::Address as AddressTestutils;
-
-    let env = Env::new();
-fn test_transfer_requires_auth() {
-    use soroban_sdk::testutils::Address as AddressTestutils;
-
-    let env = Env::new();
-    let from = Address::generate(&env);
-    let to = Address::generate(&env);
-
-    env.storage()
-        .persistent()
-        .set(&Symbol::new(&env, "balance"), &100i128);
-    env.storage()
-        .persistent()
-        .set(&Symbol::new(&env, "reentrancy_guard"), &true);
-
-    TokenContract::send(env, to, 10);
-
-    let _ = TokenContract::transfer(env, from, to, 10);
-}
-
-#[test]
-fn test_transfer_authorized() {
-    use soroban_sdk::testutils::Address as AddressTestutils;
-
-    let env = Env::new();
+fn hardcoded_keys_collide_and_overwrite_balance() {
+    let env = Env::default();
     env.mock_all_auths();
 
-    let from = Address::generate(&env);
-    let to = Address::generate(&env);
+    let owner = Address::generate(&env);
+    let spender = Address::generate(&env);
 
-    env.storage()
-        .persistent()
-        .set(&Symbol::new(&env, "balance"), &100i128);
+    TokenWithIssues::set_balance(env.clone(), owner.clone(), 100);
+    assert_eq!(TokenWithIssues::get_balance(env.clone()), 100);
 
-    let result = TokenContract::transfer(env, from, to, 10);
-    assert!(result.is_ok());
+    // Writing allowance overwrites balance because both map to "balance".
+    TokenWithIssues::set_allowance(env.clone(), owner, spender, 7);
+
+    assert_eq!(TokenWithIssues::get_allowance(env.clone()), 7);
+    assert_eq!(TokenWithIssues::get_balance(env), 7);
+}
+
+#[test]
+fn hardcoded_keys_collide_and_overwrite_allowance() {
+    let env = Env::default();
+    env.mock_all_auths();
+
+    let owner = Address::generate(&env);
+
+    TokenWithIssues::set_allowance(env.clone(), owner.clone(), owner.clone(), 55);
+    assert_eq!(TokenWithIssues::get_allowance(env.clone()), 55);
+
+    // Writing balance now overwrites what allowance previously stored.
+    TokenWithIssues::set_balance(env.clone(), owner, 12);
+
+    assert_eq!(TokenWithIssues::get_balance(env.clone()), 12);
+    assert_eq!(TokenWithIssues::get_allowance(env), 12);
+}
+
 }
