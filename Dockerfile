@@ -1,13 +1,26 @@
 # ==========================================
 # Stage 1: Rust Builder
 # ==========================================
-FROM rust:1-slim AS rust-builder
+FROM rust:1.82-slim AS rust-builder
 WORKDIR /app
 
 # Install dependencies required for building Rust on Debian
-RUN apt-get update && apt-get install -y pkg-config libssl-dev build-essential
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    pkg-config libssl-dev build-essential ca-certificates \
+    && rm -rf /var/lib/apt/lists/*
 
-# Copy backend source and compile the release binary
+# Copy manifests first for better layer caching
+COPY backend/Cargo.toml backend/Cargo.lock* backend/
+COPY backend/api/Cargo.toml backend/api/
+COPY backend/shared/Cargo.toml backend/shared/
+COPY backend/indexer/Cargo.toml backend/indexer/
+COPY backend/verifier/Cargo.toml backend/verifier/
+COPY backend/seeder/Cargo.toml backend/seeder/
+COPY backend/contract_abi/Cargo.toml backend/contract_abi/
+COPY soroban-registry/Cargo.toml soroban-registry/
+COPY soroban-registry/crates/ soroban-registry/crates/
+
+# Copy full source and build the release binary
 COPY backend/ ./backend/
 COPY database/ ./database/
 

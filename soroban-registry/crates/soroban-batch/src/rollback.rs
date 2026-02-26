@@ -95,11 +95,10 @@ fn execute_single_rollback(action: &RollbackAction) -> RollbackResult {
         }
     };
 
-    // ------------------------------------------------------------------
-    // TODO: Replace with real rollback logic once the registry backend
-    //       exposes undo/revert endpoints.  For now, each arm simulates
-    //       a successful rollback so the pipeline is testable end-to-end.
-    // ------------------------------------------------------------------
+    // Rollback is currently in simulation mode. Each arm returns success
+    // so the batch pipeline is testable end-to-end. When the registry
+    // backend exposes undo/revert endpoints, these arms should call those
+    // endpoints via reqwest and propagate real errors.
     match action {
         RollbackAction::UnpublishContract { contract_id: _ } => RollbackResult {
             action_description: description,

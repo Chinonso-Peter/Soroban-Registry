@@ -90,7 +90,7 @@ impl JobEngine {
             let permit = match engine.semaphore.clone().acquire_owned().await {
                 Ok(p) => p,
                 Err(e) => {
-                    error!("Fata error: semaphore closed: {}", e);
+                    error!("Fatal error: semaphore closed: {}", e);
                     break;
                 }
             };

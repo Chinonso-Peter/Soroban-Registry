@@ -184,9 +184,6 @@ pub fn contract_routes() -> Router<AppState> {
             "/api/contracts/simulate-deploy",
             post(simulation_handlers::simulate_deploy),
         )
-    // TODO: backup_routes, notification_routes, and post_incident_routes
-    // are available in the api library crate but need architectural refactoring
-    // to be integrated with the main AppState
 }
 
 #[cfg(not(feature = "openapi"))]

@@ -7,7 +7,7 @@ version = "0.1.0"
 edition = "2021"
 authors = ["Soroban Registry Contributors"]
 license = "MIT"
-repository = "https://github.com/yourusername/soroban-registry"
+repository = "https://github.com/ALIPHATICHYD/Soroban-Registry"
 
 [workspace.dependencies]
 # Web framework
@@ -83,3 +83,10 @@ rust_decimal = "1.35"
 # OpenAPI
 utoipa = { version = "4", features = ["axum_extras", "chrono", "uuid"] }
 utoipa-swagger-ui = { version = "8", features = ["axum"] }
+
+[profile.release]
+opt-level = 3
+lto = "thin"
+codegen-units = 1
+strip = true
+panic = "abort"

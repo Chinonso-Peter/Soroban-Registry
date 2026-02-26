@@ -4,6 +4,7 @@ import type { NextConfig } from "next";
 const apiOrigin = process.env.API_URL || process.env.NEXT_PUBLIC_API_URL || "http://localhost:3001";
 
 const nextConfig: NextConfig = {
+  output: 'standalone',
   images: {
     // Enable modern image formats (WebP, AVIF) with fallbacks
     formats: ['image/avif', 'image/webp'],

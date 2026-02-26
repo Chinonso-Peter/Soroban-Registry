@@ -1,5 +1,3 @@
-#![allow(dead_code, unused)]
-
 pub mod auth;
 pub mod backup_handlers;
 pub mod backup_routes;

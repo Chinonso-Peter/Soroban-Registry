@@ -1,4 +1,4 @@
-#![allow(dead_code, unused)]
+#![warn(unused_imports)]
 
 mod ab_test_handlers;
 mod aggregation;
@@ -147,15 +147,13 @@ async fn main() -> Result<()> {
 
     // Create app state
     let is_shutting_down = Arc::new(AtomicBool::new(false));
-background-job-queue
-  background-job-queue
-    let state = AppState::new(pool.clone(), registry, job_engine, is_shutting_down.clone());
-    
-openapi-doc
- openapi-doc
-    let state = AppState::new(pool.clone(), registry, job_engine, is_shutting_down.clone());
-    
+    // Job engine: initialize for background batch processing
+    let (job_engine, job_rx) = soroban_batch::engine::JobEngine::new();
+    let job_engine = Arc::new(job_engine);
+    let je = job_engine.clone();
+    tokio::spawn(async move { je.run_worker(job_rx).await });
 
+    let state = AppState::new(pool.clone(), registry, job_engine, is_shutting_down.clone());
 
     // Spawn the background DB and cache monitoring task
     db_monitoring::spawn_db_monitoring_task(pool.clone(), state.cache.clone());
@@ -170,7 +168,6 @@ openapi-doc
     // Warm up the cache
     state.cache.clone().warm_up(pool.clone());
 
-main
     let rate_limit_state = RateLimitState::from_env();
     rate_limit_state.spawn_eviction_task();
 

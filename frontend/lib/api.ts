@@ -1,8 +1,20 @@
-import {
-  MOCK_CONTRACTS,
-  MOCK_EXAMPLES,
-  MOCK_VERSIONS,
-} from "./mock-data";
+// Mock data: conditionally imported only in development/test.
+// In production (NEXT_PUBLIC_USE_MOCKS !== "true"), these are empty stubs
+// that never get reached (gated behind USE_MOCKS checks below).
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+let MOCK_CONTRACTS: any[] = [];
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+let MOCK_EXAMPLES: Record<string, any[]> = {};
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+let MOCK_VERSIONS: Record<string, any[]> = {};
+if (process.env.NEXT_PUBLIC_USE_MOCKS === "true") {
+  // Dynamic require ensures Next.js tree-shakes mock-data from production bundles
+  // eslint-disable-next-line @typescript-eslint/no-require-imports
+  const mocks = require("./mock-data");
+  MOCK_CONTRACTS = mocks.MOCK_CONTRACTS;
+  MOCK_EXAMPLES = mocks.MOCK_EXAMPLES;
+  MOCK_VERSIONS = mocks.MOCK_VERSIONS;
+}
 import { trackEvent } from "./analytics";
 import {
   ApiError,
