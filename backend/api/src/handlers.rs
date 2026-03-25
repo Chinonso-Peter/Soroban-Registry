@@ -336,6 +336,8 @@ struct ContractInteractionInsert<'a> {
     network: &'a Network,
 }
 
+const VERSION: &str = env!("CARGO_PKG_VERSION");
+
 pub async fn health_check(State(state): State<AppState>) -> (StatusCode, Json<Value>) {
     let uptime = state.started_at.elapsed().as_secs();
     let now = chrono::Utc::now().to_rfc3339();
@@ -349,9 +351,53 @@ pub async fn health_check(State(state): State<AppState>) -> (StatusCode, Json<Va
             StatusCode::SERVICE_UNAVAILABLE,
             Json(json!({
                 "status": "shutting_down",
-                "version": "0.1.0",
+                "version": VERSION,
                 "timestamp": now,
                 "uptime_secs": uptime
+            })),
+        );
+    }
+
+    (
+        StatusCode::OK,
+        Json(json!({
+            "status": "healthy",
+            "version": VERSION,
+            "timestamp": now
+        })),
+    )
+}
+
+pub async fn health_check_live(State(state): State<AppState>) -> StatusCode {
+    if state
+        .is_shutting_down
+        .load(std::sync::atomic::Ordering::SeqCst)
+    {
+        StatusCode::SERVICE_UNAVAILABLE
+    } else {
+        StatusCode::OK
+    }
+}
+
+pub async fn health_check_ready(State(state): State<AppState>) -> (StatusCode, Json<Value>) {
+    let uptime = state.started_at.elapsed().as_secs();
+    let now = chrono::Utc::now().to_rfc3339();
+
+    if state
+        .is_shutting_down
+        .load(std::sync::atomic::Ordering::SeqCst)
+    {
+        tracing::warn!(
+            uptime_secs = uptime,
+            "readiness check failing — shutting down"
+        );
+        return (
+            StatusCode::SERVICE_UNAVAILABLE,
+            Json(json!({
+                "status": "not_ready",
+                "reason": "shutting_down",
+                "version": VERSION,
+                "timestamp": now
             })),
         );
     }
@@ -362,31 +408,84 @@ pub async fn health_check(State(state): State<AppState>) -> (StatusCode, Json<Va
         .is_ok();
 
     if db_ok {
-        tracing::info!(uptime_secs = uptime, "health check passed");
+        tracing::info!(uptime_secs = uptime, "readiness check passed");
         (
             StatusCode::OK,
             Json(json!({
-                "status": "ok",
-                "version": "0.1.0",
-                "timestamp": now,
-                "uptime_secs": uptime
+                "status": "ready",
+                "version": VERSION,
+                "timestamp": now
             })),
         )
     } else {
         tracing::warn!(
             uptime_secs = uptime,
-            "health check degraded — db unreachable"
+            "readiness check failed — db unreachable"
         );
         (
             StatusCode::SERVICE_UNAVAILABLE,
             Json(json!({
-                "status": "degraded",
-                "version": "0.1.0",
-                "timestamp": now,
-                "uptime_secs": uptime
+                "status": "not_ready",
+                "reason": "database_unavailable",
+                "version": VERSION,
+                "timestamp": now
             })),
         )
     }
+}
+
+pub async fn health_check_detailed(State(state): State<AppState>) -> (StatusCode, Json<Value>) {
+    let uptime = state.started_at.elapsed().as_secs();
+    let now = chrono::Utc::now().to_rfc3339();
+
+    let is_shutting_down = state
+        .is_shutting_down
+        .load(std::sync::atomic::Ordering::SeqCst);
+
+    let db_health = if sqlx::query_scalar::<_, i32>("SELECT 1")
+        .fetch_one(&state.db)
+        .await
+        .is_ok()
+    {
+        json!({"status": "healthy"})
+    } else {
+        json!({"status": "unhealthy", "error": "database connection failed"})
+    };
+
+    let cache_config = state.cache.config();
+    let cache_health = json!({
+        "status": "healthy",
+        "enabled": cache_config.enabled,
+        "max_capacity": cache_config.max_capacity
+    });
+
+    let overall_status = if is_shutting_down {
+        "unhealthy"
+    } else if db_health["status"] == "unhealthy" {
+        "degraded"
+    } else {
+        "healthy"
+    };
+
+    let status_code = if is_shutting_down || db_health["status"] == "unhealthy" {
+        StatusCode::SERVICE_UNAVAILABLE
+    } else {
+        StatusCode::OK
+    };
+
+    (
+        status_code,
+        Json(json!({
+            "status": overall_status,
+            "version": VERSION,
+            "timestamp": now,
+            "uptime_secs": uptime,
+            "dependencies": {
+                "database": db_health,
+                "cache": cache_health
+            }
+        })),
+    )
 }
 
 #[utoipa::path(

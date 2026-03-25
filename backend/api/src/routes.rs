@@ -211,6 +211,9 @@ pub fn publisher_routes() -> Router<AppState> {
 pub fn health_routes() -> Router<AppState> {
     Router::new()
         .route("/health", get(handlers::health_check))
+        .route("/health/live", get(handlers::health_check_live))
+        .route("/health/ready", get(handlers::health_check_ready))
+        .route("/health/detailed", get(handlers::health_check_detailed))
         .route("/api/stats", get(handlers::get_stats))
 }
 
