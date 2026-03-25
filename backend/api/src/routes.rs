@@ -364,8 +364,7 @@ pub fn admin_routes() -> Router<AppState> {
         )
         .route(
             "/api/admin/categories/:id",
-            put(category_handlers::update_category)
-                .delete(category_handlers::delete_category),
+            put(category_handlers::update_category).delete(category_handlers::delete_category),
         )
         .route_layer(middleware::from_fn(auth::require_admin))
 }
