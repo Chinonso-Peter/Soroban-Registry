@@ -89,6 +89,7 @@ pub struct AuditLogQuery {
     pub limit: i64,
     #[serde(default)]
     pub offset: i64,
+    pub format: Option<String>,
 }
 
 fn default_audit_limit() -> i64 {
@@ -2527,7 +2528,7 @@ pub async fn get_contract_audit_log(
     State(state): State<AppState>,
     Path(id): Path<String>,
     Query(params): Query<AuditLogQuery>,
-) -> ApiResult<Json<Vec<ContractAuditLog>>> {
+) -> ApiResult<axum::response::Response> {
     let contract_uuid = Uuid::parse_str(&id).map_err(|_| {
         ApiError::bad_request(
             "InvalidContractId",
@@ -2573,7 +2574,23 @@ pub async fn get_contract_audit_log(
     .await
     .map_err(|err| db_internal_error("fetch contract audit logs", err))?;
 
-    Ok(Json(logs))
+    if params.format.as_deref() == Some("csv") {
+        let mut wtr = csv::Writer::from_writer(vec![]);
+        for log in &logs {
+            let _ = wtr.serialize(log);
+        }
+        let bytes = wtr.into_inner().unwrap_or_default();
+        let headers = [
+            (axum::http::header::CONTENT_TYPE, "text/csv"),
+            (
+                axum::http::header::CONTENT_DISPOSITION,
+                "attachment; filename=\"contract_audit_logs.csv\"",
+            ),
+        ];
+        return Ok((headers, bytes).into_response());
+    }
+
+    Ok(Json(logs).into_response())
 }
 
 #[utoipa::path(
@@ -2589,7 +2606,7 @@ pub async fn get_contract_audit_log(
 pub async fn get_all_audit_logs(
     State(state): State<AppState>,
     Query(params): Query<AuditLogQuery>,
-) -> ApiResult<Json<Vec<ContractAuditLog>>> {
+) -> ApiResult<axum::response::Response> {
     let limit = params.limit.clamp(1, 500);
     let offset = params.offset.max(0);
 
@@ -2608,7 +2625,23 @@ pub async fn get_all_audit_logs(
     .await
     .map_err(|err| db_internal_error("fetch all audit logs", err))?;
 
-    Ok(Json(logs))
+    if params.format.as_deref() == Some("csv") {
+        let mut wtr = csv::Writer::from_writer(vec![]);
+        for log in &logs {
+            let _ = wtr.serialize(log);
+        }
+        let bytes = wtr.into_inner().unwrap_or_default();
+        let headers = [
+            (axum::http::header::CONTENT_TYPE, "text/csv"),
+            (
+                axum::http::header::CONTENT_DISPOSITION,
+                "attachment; filename=\"global_audit_logs.csv\"",
+            ),
+        ];
+        return Ok((headers, bytes).into_response());
+    }
+
+    Ok(Json(logs).into_response())
 }
 
 #[utoipa::path(

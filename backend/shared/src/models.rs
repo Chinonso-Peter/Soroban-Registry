@@ -1827,6 +1827,8 @@ pub struct DependencyResponse {
     pub total_dependencies: usize,
     pub max_depth: usize,
     pub has_circular: bool,
+}
+
 // Backup and disaster recovery types
 #[derive(Debug, Clone, Serialize, Deserialize, FromRow)]
 pub struct ContractBackup {

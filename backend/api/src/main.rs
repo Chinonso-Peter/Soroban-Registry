@@ -20,9 +20,7 @@ mod deprecation_handlers;
 mod error;
 mod handlers;
 mod dependency_handlers;
-mod multisig_handlers;
-mod multisig_routes;
-mod models;
+
 mod health;
 pub mod health_monitor;
 #[cfg(test)]

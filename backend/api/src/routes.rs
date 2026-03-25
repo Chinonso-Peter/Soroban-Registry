@@ -108,12 +108,10 @@ pub fn contract_routes() -> Router<AppState> {
         .route(
             "/api/contracts/:id/dependencies",
             get(crate::dependency_handlers::get_contract_dependencies),
-            "/api/contracts/:id/trust-score",
-            get(handlers::get_trust_score),
         )
         .route(
-            "/api/contracts/:id/dependencies",
-            get(handlers::get_contract_dependencies),
+            "/api/contracts/:id/trust-score",
+            get(handlers::get_trust_score),
         )
         .route(
             "/api/contracts/:id/dependents",
