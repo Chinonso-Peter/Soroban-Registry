@@ -40,6 +40,7 @@ pub mod security_log;
 pub mod signing_handlers;
 mod simulation;
 mod simulation_handlers;
+mod similarity_handlers;
 mod state;
 mod type_safety;
 mod validation;

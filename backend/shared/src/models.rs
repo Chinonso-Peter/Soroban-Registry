@@ -960,6 +960,98 @@ pub struct CreateAlertConfigRequest {
     pub severity: Option<AlertSeverity>,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, sqlx::Type, utoipa::ToSchema)]
+#[sqlx(type_name = "similarity_match_type", rename_all = "snake_case")]
+#[serde(rename_all = "snake_case")]
+pub enum SimilarityMatchType {
+    ExactClone,
+    NearDuplicate,
+    Similar,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, sqlx::Type, utoipa::ToSchema)]
+#[sqlx(type_name = "similarity_review_status", rename_all = "snake_case")]
+#[serde(rename_all = "snake_case")]
+pub enum SimilarityReviewStatus {
+    None,
+    Pending,
+    Reviewed,
+    Dismissed,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, FromRow, utoipa::ToSchema)]
+pub struct ContractSimilaritySignature {
+    pub contract_id: Uuid,
+    pub representation_type: String,
+    pub exact_hash: String,
+    pub simhash: i64,
+    pub token_count: i32,
+    pub source_length: i32,
+    pub wasm_hash: String,
+    pub computed_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, FromRow, utoipa::ToSchema)]
+pub struct ContractSimilarityReport {
+    pub id: Uuid,
+    pub contract_id: Uuid,
+    pub similar_contract_id: Uuid,
+    pub similarity_score: Decimal,
+    pub exact_clone: bool,
+    pub match_type: SimilarityMatchType,
+    pub suspicious: bool,
+    pub flagged_for_review: bool,
+    pub review_status: SimilarityReviewStatus,
+    pub reasons: Option<serde_json::Value>,
+    pub created_at: DateTime<Utc>,
+    pub updated_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, utoipa::ToSchema)]
+pub struct ContractSimilarityResult {
+    pub contract_id: Uuid,
+    pub similar_contract_id: Uuid,
+    pub similar_contract_name: String,
+    pub similar_contract_address: String,
+    pub similarity_score: f64,
+    pub exact_clone: bool,
+    pub match_type: SimilarityMatchType,
+    pub suspicious: bool,
+    pub flagged_for_review: bool,
+    pub review_status: SimilarityReviewStatus,
+    pub reasons: serde_json::Value,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, utoipa::ToSchema)]
+pub struct ContractSimilarityResponse {
+    pub contract_id: Uuid,
+    pub total_matches: usize,
+    pub suspicious_matches: usize,
+    pub items: Vec<ContractSimilarityResult>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, utoipa::ToSchema)]
+pub struct BatchSimilarityAnalysisRequest {
+    #[serde(default)]
+    pub contract_ids: Vec<String>,
+    pub limit_per_contract: Option<i64>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, utoipa::ToSchema)]
+pub struct BatchSimilarityAnalysisItem {
+    pub contract_id: Uuid,
+    pub analyzed_contracts: usize,
+    pub suspicious_matches: usize,
+    pub items: Vec<ContractSimilarityResult>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, utoipa::ToSchema)]
+pub struct BatchSimilarityAnalysisResponse {
+    pub analyzed_contracts: usize,
+    pub total_flagged_for_review: usize,
+    pub items: Vec<BatchSimilarityAnalysisItem>,
+}
+
 // ────────────────────────────────────────────────────────────────────────────
 // Custom contract metrics (issue #89)
 // ────────────────────────────────────────────────────────────────────────────
