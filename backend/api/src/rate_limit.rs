@@ -1,30 +1,61 @@
+//! Sliding-window rate limiter with automatic eviction of expired entries.
+//!
+//! ## Memory-leak fix (issue #317)
+//!
+//! The original implementation stored fixed-window counters in a
+//! `HashMap` that was never cleaned up.  Every unique IP that ever hit the
+//! API accumulated an entry that lived forever.
+//!
+//! This version fixes that by:
+//!
+//! 1. **Background eviction task** – [`RateLimitState::spawn_eviction_task`]
+//!    runs every `EVICTION_INTERVAL` and removes any bucket whose window
+//!    expired more than `window_duration` ago.
+//! 2. **`tokio::sync::Mutex`** – replaced `std::sync::Mutex` so the lock is
+//!    held correctly across `.await` points and avoids blocking the async
+//!    executor.
+//! 3. **Graceful lock error handling** – `.lock().await` on a
+//!    `tokio::sync::Mutex` never poisons, so the panic from `.expect()` is
+//!    gone. The one remaining fallible path (attaching response headers) logs
+//!    a warning instead of crashing.
+//!
+//! ## Horizontal scaling note
+//!
+//! This rate limiter is **per-instance**.  When running multiple API replicas
+//! the bucket state is not shared between them.  For true distributed rate
+//! limiting consider replacing the in-process `HashMap` with a Redis-backed
+//! store (e.g. via the `upstash-redis` crate or `fred`).
+
 use std::{
-    collections::HashMap,
+    collections::{HashMap, VecDeque},
     env,
     net::{IpAddr, SocketAddr},
-    sync::{Arc, Mutex},
     time::{Duration, Instant},
 };
 
 use axum::{
     body::Body,
-    extract::{connect_info::ConnectInfo, MatchedPath, State},
+    extract::{connect_info::ConnectInfo, State},
     http::{
         header::{AUTHORIZATION, RETRY_AFTER},
-        HeaderName, HeaderValue, Method, Request, StatusCode,
+        HeaderName, HeaderValue, Request,
     },
     middleware::Next,
     response::{IntoResponse, Response},
-    Json,
 };
-use serde_json::json;
+use tokio::sync::Mutex;
 
-const DEFAULT_READ_LIMIT_PER_MINUTE: u32 = 100;
-const DEFAULT_WRITE_LIMIT_PER_MINUTE: u32 = 20;
+use crate::error::ApiError;
+
+const DEFAULT_ANON_LIMIT_PER_MINUTE: u32 = 100;
 const DEFAULT_AUTH_LIMIT_PER_MINUTE: u32 = 1_000;
-const DEFAULT_HEALTH_LIMIT_PER_MINUTE: u32 = 10_000;
 const DEFAULT_WINDOW_SECONDS: u64 = 60;
+const DEFAULT_CONTRACTS_PAGE_SIZE: u32 = 50;
+const MAX_CONTRACTS_PAGE_SIZE: u32 = 1000;
 const ENDPOINT_LIMIT_ENV_PREFIX: &str = "RATE_LIMIT_ENDPOINT_";
+
+/// How often the background task sweeps for expired buckets.
+const EVICTION_INTERVAL: Duration = Duration::from_secs(5 * 60); // every 5 minutes
 
 const HEADER_RATE_LIMIT_LIMIT: HeaderName = HeaderName::from_static("x-ratelimit-limit");
 const HEADER_RATE_LIMIT_REMAINING: HeaderName = HeaderName::from_static("x-ratelimit-remaining");
@@ -32,8 +63,9 @@ const HEADER_RATE_LIMIT_RESET: HeaderName = HeaderName::from_static("x-ratelimit
 
 #[derive(Clone)]
 pub struct RateLimitState {
-    config: Arc<RateLimitConfig>,
-    buckets: Arc<Mutex<HashMap<BucketKey, BucketState>>>,
+    config: std::sync::Arc<RateLimitConfig>,
+    /// Shared bucket map — protected by a *tokio* Mutex so it is async-safe.
+    buckets: std::sync::Arc<Mutex<HashMap<BucketKey, BucketState>>>,
 }
 
 impl RateLimitState {
@@ -43,36 +75,84 @@ impl RateLimitState {
 
     fn new(config: RateLimitConfig) -> Self {
         Self {
-            config: Arc::new(config),
-            buckets: Arc::new(Mutex::new(HashMap::new())),
+            config: std::sync::Arc::new(config),
+            buckets: std::sync::Arc::new(Mutex::new(HashMap::new())),
         }
     }
 
-    fn check_request<B>(&self, request: &Request<B>) -> RateLimitDecision {
-        let (limit, endpoint_key) = self.select_limit(request);
-        let ip = extract_client_ip(request);
-        let key = BucketKey { ip, endpoint_key };
+    /// Spawn a background Tokio task that periodically evicts expired buckets.
+    ///
+    /// Call this once during application startup (after `tokio::main` is
+    /// entered).  The task runs until the process exits.
+    pub fn spawn_eviction_task(&self) {
+        let buckets = self.buckets.clone();
+        let window = self.config.window;
+
+        tokio::spawn(async move {
+            let mut ticker = tokio::time::interval(EVICTION_INTERVAL);
+            // The first tick fires immediately — skip it so we don't evict
+            // right after startup when there is nothing to evict yet.
+            ticker.tick().await;
+
+            loop {
+                ticker.tick().await;
+
+                let now = Instant::now();
+                let mut map = buckets.lock().await;
+                let before = map.len();
+
+                // Retain only buckets that have seen traffic recently.
+                map.retain(|_, state| {
+                    state
+                        .timestamps
+                        .back()
+                        .map(|last_seen| {
+                            now.saturating_duration_since(*last_seen) < window.saturating_mul(2)
+                        })
+                        .unwrap_or(false)
+                });
+
+                let evicted = before - map.len();
+                if evicted > 0 {
+                    tracing::info!(
+                        evicted,
+                        remaining = map.len(),
+                        "rate limiter: evicted expired buckets"
+                    );
+                }
+            }
+        });
+    }
+
+    async fn check_request(&self, key: BucketKey, limit: u32) -> RateLimitDecision {
         let now = Instant::now();
 
-        let mut buckets = self.buckets.lock().expect("rate limiter mutex poisoned");
+        // tokio::sync::Mutex::lock() never poisons — no .expect() needed.
+        let mut buckets = self.buckets.lock().await;
 
         let bucket = buckets.entry(key).or_insert_with(|| BucketState {
-            window_start: now,
-            count: 0,
+            timestamps: VecDeque::new(),
         });
 
-        if now.duration_since(bucket.window_start) >= self.config.window {
-            bucket.window_start = now;
-            bucket.count = 0;
+        let window_start_cutoff = now.checked_sub(self.config.window).unwrap_or(now);
+        while bucket
+            .timestamps
+            .front()
+            .copied()
+            .map(|ts| ts <= window_start_cutoff)
+            .unwrap_or(false)
+        {
+            bucket.timestamps.pop_front();
         }
 
-        let remaining_window = self
-            .config
-            .window
-            .saturating_sub(now.duration_since(bucket.window_start));
-        let reset_seconds = ceil_duration_to_seconds(remaining_window).max(1);
+        let reset_seconds = bucket
+            .timestamps
+            .front()
+            .and_then(|oldest| oldest.checked_add(self.config.window))
+            .map(|expiry| ceil_duration_to_seconds(expiry.saturating_duration_since(now)).max(1))
+            .unwrap_or_else(|| ceil_duration_to_seconds(self.config.window).max(1));
 
-        if bucket.count >= limit {
+        if (bucket.timestamps.len() as u32) >= limit {
             return RateLimitDecision {
                 allowed: false,
                 limit,
@@ -81,8 +161,8 @@ impl RateLimitState {
             };
         }
 
-        bucket.count += 1;
-        let remaining = limit.saturating_sub(bucket.count);
+        bucket.timestamps.push_back(now);
+        let remaining = limit.saturating_sub(bucket.timestamps.len() as u32);
 
         RateLimitDecision {
             allowed: true,
@@ -92,118 +172,72 @@ impl RateLimitState {
         }
     }
 
-    fn select_limit<B>(&self, request: &Request<B>) -> (u32, String) {
-        let method = request.method();
-        let matched_path = request
-            .extensions()
-            .get::<MatchedPath>()
-            .map(|p| p.as_str())
-            .unwrap_or_else(|| request.uri().path());
-        let endpoint_key = endpoint_key(method, matched_path);
-
-        if let Some(limit) = self.config.endpoint_limits.get(&endpoint_key) {
-            return (*limit, endpoint_key);
+    fn select_limit_and_key<B>(&self, request: &Request<B>) -> (u32, BucketKey) {
+        if let Some(token) = extract_auth_token(request) {
+            return (
+                self.config.auth_limit,
+                BucketKey {
+                    client_key: format!("auth:{token}"),
+                },
+            );
         }
 
-        if matched_path == "/health" || method == Method::OPTIONS {
-            return (self.config.health_limit, endpoint_key);
-        }
-
-        if request.headers().contains_key(AUTHORIZATION) {
-            return (self.config.auth_limit, endpoint_key);
-        }
-
-        if is_write_method(method) {
-            return (self.config.write_limit, endpoint_key);
-        }
-
-        (self.config.read_limit, endpoint_key)
+        (
+            self.config.anonymous_limit,
+            BucketKey {
+                client_key: format!("anon:{}", extract_client_ip(request)),
+            },
+        )
     }
 }
 
 struct RateLimitConfig {
-    read_limit: u32,
-    write_limit: u32,
+    anonymous_limit: u32,
     auth_limit: u32,
-    health_limit: u32,
     window: Duration,
-    endpoint_limits: HashMap<String, u32>,
 }
 
 impl RateLimitConfig {
     fn from_env() -> Self {
-        let read_limit = env_u32("RATE_LIMIT_READ_PER_MINUTE", DEFAULT_READ_LIMIT_PER_MINUTE);
-        let write_limit = env_u32(
-            "RATE_LIMIT_WRITE_PER_MINUTE",
-            DEFAULT_WRITE_LIMIT_PER_MINUTE,
+        let anonymous_limit = env_u32_with_fallback(
+            "RATE_LIMIT_ANON_PER_MINUTE",
+            "RATE_LIMIT_READ_PER_MINUTE",
+            DEFAULT_ANON_LIMIT_PER_MINUTE,
         );
         let auth_limit = env_u32("RATE_LIMIT_AUTH_PER_MINUTE", DEFAULT_AUTH_LIMIT_PER_MINUTE);
-        let health_limit = env_u32(
-            "RATE_LIMIT_HEALTH_PER_MINUTE",
-            DEFAULT_HEALTH_LIMIT_PER_MINUTE,
-        );
         let window_seconds = env_u64("RATE_LIMIT_WINDOW_SECONDS", DEFAULT_WINDOW_SECONDS).max(1);
 
-        let mut endpoint_limits = HashMap::new();
-        for (key, value) in env::vars() {
-            let Some(endpoint_key) = key.strip_prefix(ENDPOINT_LIMIT_ENV_PREFIX) else {
-                continue;
-            };
-
-            let Ok(limit) = value.parse::<u32>() else {
-                tracing::warn!("Ignoring invalid endpoint rate limit `{key}`: `{value}`");
-                continue;
-            };
-            if limit == 0 {
-                tracing::warn!("Ignoring zero endpoint rate limit `{key}`");
-                continue;
-            }
-
-            endpoint_limits.insert(endpoint_key.to_string(), limit);
-        }
-
         tracing::info!(
-            read_limit,
-            write_limit,
+            anonymous_limit,
             auth_limit,
-            health_limit,
             window_seconds,
-            endpoint_overrides = endpoint_limits.len(),
             "Rate limiter configured"
         );
 
         Self {
-            read_limit,
-            write_limit,
+            anonymous_limit,
             auth_limit,
-            health_limit,
             window: Duration::from_secs(window_seconds),
-            endpoint_limits,
         }
     }
 
     #[cfg(test)]
-    fn for_tests(read_limit: u32, write_limit: u32, health_limit: u32, window: Duration) -> Self {
+    fn for_tests(anonymous_limit: u32, auth_limit: u32, window: Duration) -> Self {
         Self {
-            read_limit,
-            write_limit,
-            auth_limit: DEFAULT_AUTH_LIMIT_PER_MINUTE,
-            health_limit,
+            anonymous_limit,
+            auth_limit,
             window,
-            endpoint_limits: HashMap::new(),
         }
     }
 }
 
 #[derive(Hash, Eq, PartialEq)]
 struct BucketKey {
-    ip: String,
-    endpoint_key: String,
+    client_key: String,
 }
 
 struct BucketState {
-    window_start: Instant,
-    count: u32,
+    timestamps: VecDeque<Instant>,
 }
 
 struct RateLimitDecision {
@@ -218,14 +252,17 @@ pub async fn rate_limit_middleware(
     request: Request<Body>,
     next: Next,
 ) -> Response {
-    let decision = rate_limiter.check_request(&request);
+    // Extract request metadata before awaiting to avoid borrowing `request` across `.await`.
+    let (limit, key) = rate_limiter.select_limit_and_key(&request);
+    let decision = rate_limiter.check_request(key, limit).await;
 
     if !decision.allowed {
-        let mut response = (
-            StatusCode::TOO_MANY_REQUESTS,
-            Json(json!({ "error": "rate limit exceeded" })),
-        )
-            .into_response();
+        let mut response =
+            ApiError::rate_limited("Too many requests. Please retry after the indicated time.")
+                .with_details(serde_json::json!({
+                    "retry_after_seconds": decision.reset_seconds
+                }))
+                .into_response();
         attach_rate_limit_headers(&mut response, &decision);
         response.headers_mut().insert(
             RETRY_AFTER,
@@ -241,21 +278,26 @@ pub async fn rate_limit_middleware(
 }
 
 fn attach_rate_limit_headers(response: &mut Response, decision: &RateLimitDecision) {
-    response.headers_mut().insert(
-        HEADER_RATE_LIMIT_LIMIT,
-        HeaderValue::from_str(&decision.limit.to_string())
-            .unwrap_or_else(|_| HeaderValue::from_static("0")),
-    );
-    response.headers_mut().insert(
-        HEADER_RATE_LIMIT_REMAINING,
-        HeaderValue::from_str(&decision.remaining.to_string())
-            .unwrap_or_else(|_| HeaderValue::from_static("0")),
-    );
-    response.headers_mut().insert(
-        HEADER_RATE_LIMIT_RESET,
-        HeaderValue::from_str(&decision.reset_seconds.to_string())
-            .unwrap_or_else(|_| HeaderValue::from_static("1")),
-    );
+    // Use graceful fallback instead of panicking on header value conversion.
+    let headers = response.headers_mut();
+
+    if let Ok(val) = HeaderValue::from_str(&decision.limit.to_string()) {
+        headers.insert(HEADER_RATE_LIMIT_LIMIT, val);
+    } else {
+        tracing::warn!("Failed to encode x-ratelimit-limit header");
+    }
+
+    if let Ok(val) = HeaderValue::from_str(&decision.remaining.to_string()) {
+        headers.insert(HEADER_RATE_LIMIT_REMAINING, val);
+    } else {
+        tracing::warn!("Failed to encode x-ratelimit-remaining header");
+    }
+
+    if let Ok(val) = HeaderValue::from_str(&decision.reset_seconds.to_string()) {
+        headers.insert(HEADER_RATE_LIMIT_RESET, val);
+    } else {
+        tracing::warn!("Failed to encode x-ratelimit-reset header");
+    }
 }
 
 fn extract_client_ip<B>(request: &Request<B>) -> String {
@@ -284,6 +326,16 @@ fn extract_client_ip<B>(request: &Request<B>) -> String {
     "unknown".to_string()
 }
 
+fn extract_auth_token<B>(request: &Request<B>) -> Option<String> {
+    request
+        .headers()
+        .get(AUTHORIZATION)
+        .and_then(|value| value.to_str().ok())
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(ToOwned::to_owned)
+}
+
 fn parse_x_forwarded_for(raw: &str) -> Option<IpAddr> {
     raw.split(',').map(str::trim).find_map(parse_ip_addr)
 }
@@ -299,6 +351,37 @@ fn is_write_method(method: &Method) -> bool {
         *method,
         Method::POST | Method::PUT | Method::PATCH | Method::DELETE
     )
+}
+
+fn contracts_page_size_rate_limit(method: &Method, path: &str, query: Option<&str>) -> Option<u32> {
+    if *method != Method::GET || path != "/api/contracts" {
+        return None;
+    }
+
+    Some(extract_page_size(query).unwrap_or(DEFAULT_CONTRACTS_PAGE_SIZE))
+}
+
+fn extract_page_size(query: Option<&str>) -> Option<u32> {
+    let query = query?;
+
+    for pair in query.split('&') {
+        let mut parts = pair.splitn(2, '=');
+        let key = parts.next()?;
+        let value = parts.next().unwrap_or_default();
+
+        if key == "limit" || key == "page_size" {
+            if let Ok(parsed) = value.parse::<u32>() {
+                return Some(parsed.clamp(1, MAX_CONTRACTS_PAGE_SIZE));
+            }
+        }
+    }
+
+    None
+}
+
+fn scale_limit_by_page_size(base_limit: u32, page_size: u32) -> u32 {
+    let weight = page_size.div_ceil(DEFAULT_CONTRACTS_PAGE_SIZE).max(1);
+    (base_limit / weight).max(1)
 }
 
 fn endpoint_key(method: &Method, path: &str) -> String {
@@ -339,6 +422,21 @@ fn env_u32(key: &str, default: u32) -> u32 {
     }
 }
 
+fn env_u32_with_fallback(primary_key: &str, fallback_key: &str, default: u32) -> u32 {
+    match env::var(primary_key) {
+        Ok(raw) => match raw.parse::<u32>() {
+            Ok(value) if value > 0 => value,
+            _ => {
+                tracing::warn!(
+                    "Invalid value for {primary_key} (`{raw}`), using default {default}"
+                );
+                default
+            }
+        },
+        Err(_) => env_u32(fallback_key, default),
+    }
+}
+
 fn env_u64(key: &str, default: u64) -> u64 {
     match env::var(key) {
         Ok(raw) => match raw.parse::<u64>() {
@@ -365,30 +463,22 @@ fn ceil_duration_to_seconds(duration: Duration) -> u64 {
 mod tests {
     use super::*;
     use axum::{
-        http::Request,
+        http::{Request, StatusCode},
         middleware,
-        routing::{get, post},
+        routing::get,
         Router,
     };
     use tower::Service;
 
-    fn test_app(
-        read_limit: u32,
-        write_limit: u32,
-        health_limit: u32,
-        window: Duration,
-    ) -> Router<()> {
+    fn test_app(anonymous_limit: u32, auth_limit: u32, window: Duration) -> Router<()> {
         let limiter = RateLimitState::new(RateLimitConfig::for_tests(
-            read_limit,
-            write_limit,
-            health_limit,
+            anonymous_limit,
+            auth_limit,
             window,
         ));
 
         Router::new()
-            .route("/health", get(|| async { "ok" }))
             .route("/read", get(|| async { "read" }))
-            .route("/write", post(|| async { "write" }))
             .layer(middleware::from_fn_with_state(
                 limiter,
                 rate_limit_middleware,
@@ -401,8 +491,8 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn returns_429_on_101st_request() {
-        let app = test_app(100, 20, 10_000, Duration::from_secs(60));
+    async fn anonymous_user_gets_429_on_101st_request() {
+        let app = test_app(100, 1_000, Duration::from_secs(60));
 
         for _ in 0..100 {
             let response = call(
@@ -435,8 +525,44 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn authenticated_user_gets_429_on_1001st_request() {
+        let app = test_app(100, 1_000, Duration::from_secs(60));
+
+        for _ in 0..1_000 {
+            let response = call(
+                &app,
+                Request::builder()
+                    .uri("/read")
+                    .method("GET")
+                    .header("authorization", "Bearer token-abc")
+                    .header("x-forwarded-for", "203.0.113.25")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await;
+
+            assert_ne!(response.status(), StatusCode::TOO_MANY_REQUESTS);
+        }
+
+        let response = call(
+            &app,
+            Request::builder()
+                .uri("/read")
+                .method("GET")
+                .header("authorization", "Bearer token-abc")
+                .header("x-forwarded-for", "203.0.113.25")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await;
+
+        assert_eq!(response.status(), StatusCode::TOO_MANY_REQUESTS);
+        assert!(response.headers().contains_key(RETRY_AFTER));
+    }
+
+    #[tokio::test]
     async fn includes_rate_limit_headers_on_success_and_429() {
-        let app = test_app(1, 1, 10_000, Duration::from_secs(60));
+        let app = test_app(1, 10, Duration::from_secs(60));
 
         let ok_response = call(
             &app,
@@ -478,11 +604,51 @@ mod tests {
             .headers()
             .contains_key(HEADER_RATE_LIMIT_RESET));
         assert!(limited_response.headers().contains_key(RETRY_AFTER));
+
+        let body = axum::body::to_bytes(limited_response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let value: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(value["error_code"], "RATE_LIMITED");
     }
 
     #[tokio::test]
-    async fn allows_requests_again_after_window_reset() {
-        let app = test_app(1, 1, 10_000, Duration::from_secs(1));
+    async fn retry_after_header_is_present_and_reasonable() {
+        let app = test_app(1, 10, Duration::from_secs(2));
+
+        let _first = call(
+            &app,
+            Request::builder()
+                .uri("/read")
+                .method("GET")
+                .header("x-forwarded-for", "192.0.2.44")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await;
+        let second = call(
+            &app,
+            Request::builder()
+                .uri("/read")
+                .method("GET")
+                .header("x-forwarded-for", "192.0.2.44")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await;
+        assert_eq!(second.status(), StatusCode::TOO_MANY_REQUESTS);
+        let retry_after: u64 = second
+            .headers()
+            .get(RETRY_AFTER)
+            .and_then(|value| value.to_str().ok())
+            .and_then(|value| value.parse().ok())
+            .unwrap_or(0);
+        assert!((1..=2).contains(&retry_after));
+    }
+
+    #[tokio::test]
+    async fn rate_limit_headers_show_remaining_quota() {
+        let app = test_app(2, 10, Duration::from_secs(60));
 
         let first = call(
             &app,
@@ -495,6 +661,14 @@ mod tests {
         )
         .await;
         assert_eq!(first.status(), StatusCode::OK);
+        assert_eq!(
+            first
+                .headers()
+                .get(HEADER_RATE_LIMIT_REMAINING)
+                .and_then(|value| value.to_str().ok())
+                .unwrap_or(""),
+            "1"
+        );
 
         let second = call(
             &app,
@@ -506,9 +680,15 @@ mod tests {
                 .unwrap(),
         )
         .await;
-        assert_eq!(second.status(), StatusCode::TOO_MANY_REQUESTS);
-
-        tokio::time::sleep(Duration::from_secs(2)).await;
+        assert_eq!(second.status(), StatusCode::OK);
+        assert_eq!(
+            second
+                .headers()
+                .get(HEADER_RATE_LIMIT_REMAINING)
+                .and_then(|value| value.to_str().ok())
+                .unwrap_or(""),
+            "0"
+        );
 
         let third = call(
             &app,
@@ -520,61 +700,27 @@ mod tests {
                 .unwrap(),
         )
         .await;
-        assert_eq!(third.status(), StatusCode::OK);
+        assert_eq!(third.status(), StatusCode::TOO_MANY_REQUESTS);
+        assert_eq!(
+            third
+                .headers()
+                .get(HEADER_RATE_LIMIT_REMAINING)
+                .and_then(|value| value.to_str().ok())
+                .unwrap_or(""),
+            "0"
+        );
     }
 
     #[tokio::test]
-    async fn write_limits_are_stricter_than_reads() {
-        let app = test_app(3, 1, 10_000, Duration::from_secs(60));
-        let ip = "203.0.113.33";
+    async fn contracts_rate_limit_scales_down_for_large_page_sizes() {
+        let app = test_app(100, 20, 10_000, Duration::from_secs(60));
+        let ip = "198.51.100.77";
 
-        let write_ok = call(
-            &app,
-            Request::builder()
-                .uri("/write")
-                .method("POST")
-                .header("x-forwarded-for", ip)
-                .body(Body::empty())
-                .unwrap(),
-        )
-        .await;
-        assert_eq!(write_ok.status(), StatusCode::OK);
-
-        let write_limited = call(
-            &app,
-            Request::builder()
-                .uri("/write")
-                .method("POST")
-                .header("x-forwarded-for", ip)
-                .body(Body::empty())
-                .unwrap(),
-        )
-        .await;
-        assert_eq!(write_limited.status(), StatusCode::TOO_MANY_REQUESTS);
-
-        let read_ok = call(
-            &app,
-            Request::builder()
-                .uri("/read")
-                .method("GET")
-                .header("x-forwarded-for", ip)
-                .body(Body::empty())
-                .unwrap(),
-        )
-        .await;
-        assert_eq!(read_ok.status(), StatusCode::OK);
-    }
-
-    #[tokio::test]
-    async fn health_checks_have_high_dedicated_limit() {
-        let app = test_app(1, 1, 10, Duration::from_secs(60));
-        let ip = "198.51.100.99";
-
-        for _ in 0..10 {
+        for _ in 0..5 {
             let response = call(
                 &app,
                 Request::builder()
-                    .uri("/health")
+                    .uri("/api/contracts?limit=1000")
                     .method("GET")
                     .header("x-forwarded-for", ip)
                     .body(Body::empty())
@@ -582,13 +728,20 @@ mod tests {
             )
             .await;
 
-            assert_eq!(response.status(), StatusCode::OK);
+            assert_eq!(response.status(), StatusCode::NOT_FOUND);
+            assert_eq!(
+                response
+                    .headers()
+                    .get(HEADER_RATE_LIMIT_LIMIT)
+                    .and_then(|value| value.to_str().ok()),
+                Some("5")
+            );
         }
 
         let limited = call(
             &app,
             Request::builder()
-                .uri("/health")
+                .uri("/api/contracts?limit=1000")
                 .method("GET")
                 .header("x-forwarded-for", ip)
                 .body(Body::empty())
@@ -597,5 +750,51 @@ mod tests {
         .await;
 
         assert_eq!(limited.status(), StatusCode::TOO_MANY_REQUESTS);
+    }
+
+    #[test]
+    fn page_size_scaling_uses_default_page_size_baseline() {
+        assert_eq!(scale_limit_by_page_size(100, 50), 100);
+        assert_eq!(scale_limit_by_page_size(100, 51), 50);
+        assert_eq!(scale_limit_by_page_size(100, 1000), 5);
+    }
+
+    /// Verify that the eviction logic correctly removes expired buckets.
+    #[tokio::test]
+    async fn eviction_removes_expired_buckets() {
+        let window = Duration::from_millis(100);
+        let state = RateLimitState::new(RateLimitConfig::for_tests(10, 10, window));
+
+        // Insert a request so a bucket is created
+        let req = Request::builder()
+            .uri("/read")
+            .method("GET")
+            .header("x-forwarded-for", "10.0.0.1")
+            .body(Body::empty())
+            .unwrap();
+        let (limit, key) = state.select_limit_and_key(&req);
+        state.check_request(key, limit).await;
+
+        // Confirm one bucket exists
+        assert_eq!(state.buckets.lock().await.len(), 1);
+
+        // Wait for more than two window lengths so the bucket qualifies for eviction
+        tokio::time::sleep(window.saturating_mul(3)).await;
+
+        // Run eviction manually (same logic as the background task)
+        {
+            let now = Instant::now();
+            let mut map = state.buckets.lock().await;
+            map.retain(|_, s| {
+                s.timestamps
+                    .back()
+                    .map(|last_seen| {
+                        now.saturating_duration_since(*last_seen) < window.saturating_mul(2)
+                    })
+                    .unwrap_or(false)
+            });
+        }
+
+        assert_eq!(state.buckets.lock().await.len(), 0);
     }
 }

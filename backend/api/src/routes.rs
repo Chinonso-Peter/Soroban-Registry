@@ -1,34 +1,263 @@
-use axum::{
-    routing::{get, post, put},
-    Router,
+#[cfg(feature = "openapi")]
+use crate::openapi;
+use crate::{
+    ab_test_handlers, auth, auth_handlers, batch_verify_handlers, breaking_changes,
+    canary_handlers, category_handlers, compatibility_testing_handlers, contract_events,
+    custom_metrics_handlers, deprecation_handlers, handlers, metrics_handler, migration_handlers,
+    performance_handlers, resource_handlers, similarity_handlers, simulation_handlers,
+    state::AppState, websocket,
 };
 
-use crate::{handlers, state::AppState};
+use axum::{
+    middleware,
+    routing::{delete, get, patch, post, put},
+    Router,
+};
+#[cfg(feature = "openapi")]
+use utoipa::OpenApi;
+#[cfg(feature = "openapi")]
+use utoipa_swagger_ui::SwaggerUi;
+
+pub fn observability_routes() -> Router<AppState> {
+    Router::new().route("/metrics", get(metrics_handler::metrics_endpoint))
+}
+
+pub fn auth_routes() -> Router<AppState> {
+    Router::new()
+        .route("/api/auth/challenge", get(auth_handlers::get_challenge))
+        .route("/api/auth/verify", post(auth_handlers::verify_challenge))
+}
 
 pub fn contract_routes() -> Router<AppState> {
     Router::new()
-        .route("/api/contracts", get(handlers::list_contracts))
-        .route("/api/contracts", post(handlers::publish_contract))
+        .route("/ws/contracts", get(contract_events::contracts_websocket))
+        .route(
+            "/api/contracts",
+            get(handlers::list_contracts).post(handlers::publish_contract),
+        )
+        .route(
+            "/api/contracts/suggestions",
+            get(handlers::get_contract_search_suggestions),
+        )
+        .route(
+            "/api/contracts/trending",
+            get(handlers::get_trending_contracts),
+        )
+        .route("/api/contracts/batch", post(handlers::get_contracts_batch))
+        .route("/contracts/batch", post(handlers::get_contracts_batch))
+        .route("/api/contracts/graph", get(handlers::get_contract_graph))
         .route("/api/contracts/:id", get(handlers::get_contract))
+        .route(
+            "/api/contracts/:id/metadata",
+            patch(handlers::update_contract_metadata),
+        )
+        .route(
+            "/api/contracts/:id/publisher",
+            patch(handlers::change_contract_publisher),
+        )
+        .route(
+            "/api/contracts/:id/status",
+            patch(handlers::update_contract_status),
+        )
+        .route(
+            "/api/contracts/:id/audit-log",
+            get(handlers::get_contract_audit_log),
+        )
         .route("/api/contracts/:id/abi", get(handlers::get_contract_abi))
-        .route("/api/contracts/:id/versions", get(handlers::get_contract_versions))
+        .route(
+            "/api/contracts/:id/openapi.yaml",
+            get(handlers::get_contract_openapi_yaml),
+        )
+        .route(
+            "/api/contracts/:id/openapi.json",
+            get(handlers::get_contract_openapi_json),
+        )
         .route(
             "/api/contracts/:id/versions",
-            get(handlers::get_contract_versions),
+            get(handlers::get_contract_versions).post(handlers::create_contract_version),
+        )
+        .route(
+            "/api/contracts/:id/changelog",
+            get(handlers::get_contract_changelog),
+        )
+        .route(
+            "/api/contracts/:id/versions/:version/source",
+            get(handlers::get_contract_source).post(handlers::upload_contract_source),
+        )
+        .route(
+            "/api/contracts/:id/versions/:version/source/diff",
+            get(handlers::get_contract_source_diff),
+        )
+        .route(
+            "/contracts/:id/changelog",
+            get(handlers::get_contract_changelog),
+        )
+        .route(
+            "/api/contracts/breaking-changes",
+            get(breaking_changes::get_breaking_changes),
+        )
+        .route(
+            "/api/contracts/:id/interactions",
+            get(handlers::get_contract_interactions).post(handlers::post_contract_interaction),
+        )
+        .route(
+            "/api/contracts/:id/interactions/batch",
+            post(handlers::post_contract_interactions_batch),
+        )
+        .route(
+            "/api/contracts/:id/deprecation-info",
+            get(deprecation_handlers::get_deprecation_info),
+        )
+        .route(
+            "/api/contracts/:id/deprecate",
+            post(deprecation_handlers::deprecate_contract),
+        )
+        .route(
+            "/api/contracts/:id/state/:key",
+            get(handlers::get_contract_state)
+                .put(handlers::update_contract_state)
+                .post(handlers::update_contract_state),
         )
         .route(
             "/api/contracts/:id/analytics",
-            get(handlers::get_contract_analytics),
+            get(analytics_handlers::get_contract_analytics),
+        )
+        .route(
+            "/api/analytics/dashboard",
+            get(handlers::get_dashboard_analytics),
+        )
+        .route(
+            "/api/contracts/:id/dependencies",
+            get(crate::dependency_handlers::get_contract_dependencies),
+        )
+        .route(
+            "/api/contracts/:id/trust-score",
+            get(handlers::get_trust_score),
+        )
+        .route(
+            "/api/contracts/:id/dependents",
+            get(handlers::get_contract_dependents),
+        )
+        .route(
+            "/api/contracts/:id/impact",
+            get(handlers::get_impact_analysis),
+        )
+        .route(
+            "/api/contracts/:id/similar",
+            get(similarity_handlers::get_similar_contracts),
+        )
+        .route(
+            "/contracts/:id/similar",
+            get(similarity_handlers::get_similar_contracts),
         )
         .route("/api/contracts/verify", post(handlers::verify_contract))
-        .route("/api/contracts/:id/deployments/status", get(handlers::get_deployment_status))
+        .route(
+            "/api/contracts/batch-verify",
+            post(batch_verify_handlers::batch_verify_contracts),
+        )
+        .route(
+            "/api/contracts/similarity/analyze",
+            post(similarity_handlers::analyze_contract_similarity_batch),
+        )
+        .route(
+            "/api/contracts/:id/performance",
+            get(performance_handlers::get_contract_performance_overview),
+        )
+        .route(
+            "/api/contracts/:id/metrics",
+            get(custom_metrics_handlers::get_contract_metrics)
+                .post(custom_metrics_handlers::record_contract_metric),
+        )
+        .route(
+            "/api/contracts/:id/resources",
+            get(resource_handlers::get_contract_resources),
+        )
+        .route(
+            "/api/contracts/:id/metrics/batch",
+            post(custom_metrics_handlers::record_metrics_batch),
+        )
+        .route(
+            "/api/contracts/:id/metrics/catalog",
+            get(custom_metrics_handlers::get_metric_catalog),
+        )
+        .route(
+            "/api/contracts/:id/compatibility-matrix",
+            get(compatibility_testing_handlers::get_compatibility_matrix),
+        )
+        .route(
+            "/api/contracts/:id/compatibility-matrix/test",
+            post(compatibility_testing_handlers::run_compatibility_test),
+        )
+        .route(
+            "/api/contracts/:id/compatibility-matrix/history",
+            get(compatibility_testing_handlers::get_compatibility_history),
+        )
+        .route(
+            "/api/contracts/:id/compatibility-matrix/notifications",
+            get(compatibility_testing_handlers::get_compatibility_notifications),
+        )
+        .route(
+            "/api/contracts/:id/compatibility-matrix/notifications/read",
+            post(compatibility_testing_handlers::mark_notifications_read),
+        )
+        .route(
+            "/api/contracts/:id/deployments",
+            get(handlers::get_contract_deployments),
+        )
+        .route(
+            "/api/contracts/:id/deployments/status",
+            get(handlers::get_deployment_status),
+        )
+        .route(
+            "/api/contracts/:id/deployment-status",
+            get(handlers::get_deployment_status),
+        )
         .route("/api/deployments/green", post(handlers::deploy_green))
-        .route("/api/deployments/switch", post(handlers::switch_deployment))
-        .route("/api/deployments/:contract_id/rollback", post(handlers::rollback_deployment))
-        .route("/api/deployments/health", post(handlers::report_health_check))
+        .route(
+            "/api/contracts/:id/deploy-green",
+            post(handlers::deploy_green),
+        )
+        .route(
+            "/api/contracts/simulate-deploy",
+            post(simulation_handlers::simulate_deploy),
+        )
+        .merge(favorite_routes())
 }
 
-/// Publisher-related routes
+pub fn organization_routes() -> Router<AppState> {
+    Router::new()
+        .route(
+            "/api/organizations",
+            post(org_handlers::create_organization),
+        )
+        .route(
+            "/api/organizations/:id",
+            get(org_handlers::get_organization).patch(org_handlers::update_organization),
+        )
+        .route(
+            "/api/organizations/:id/members",
+            get(org_handlers::list_org_members),
+        )
+        .route(
+            "/api/organizations/:id/invitations",
+            post(org_handlers::invite_member),
+        )
+        .route(
+            "/api/organizations/invitations/:token/accept",
+            post(org_handlers::accept_invitation),
+        )
+}
+
+#[cfg(not(feature = "openapi"))]
+pub fn openapi_routes() -> Router<AppState> {
+    Router::new()
+}
+
+#[cfg(feature = "openapi")]
+pub fn openapi_routes() -> Router<AppState> {
+    Router::new().merge(SwaggerUi::new("/docs").url("/openapi.json", openapi::ApiDoc::openapi()))
+}
+
 pub fn publisher_routes() -> Router<AppState> {
     Router::new()
         .route("/api/publishers", post(handlers::create_publisher))
@@ -39,16 +268,204 @@ pub fn publisher_routes() -> Router<AppState> {
         )
 }
 
-/// Health check routes
+pub fn favorite_routes() -> Router<AppState> {
+    Router::new()
+        .route(
+            "/api/favorites/search",
+            get(handlers::list_favorite_searches).post(handlers::save_favorite_search),
+        )
+        .route(
+            "/api/favorites/search/:id",
+            delete(handlers::delete_favorite_search),
+        )
+}
+
 pub fn health_routes() -> Router<AppState> {
     Router::new()
         .route("/health", get(handlers::health_check))
+        .route("/health/live", get(handlers::health_check_live))
+        .route("/health/ready", get(handlers::health_check_ready))
+        .route("/health/detailed", get(handlers::health_check_detailed))
         .route("/api/stats", get(handlers::get_stats))
+        // Registry-wide analytics summary (issue #415)
+        .route(
+            "/api/analytics/summary",
+            get(analytics_handlers::get_analytics_summary),
+        )
 }
 
-/// Migration-related routes
+pub fn network_routes() -> Router<AppState> {
+    Router::new()
+        .route("/networks", get(handlers::list_networks))
+        .route("/api/networks", get(handlers::list_networks))
+}
+
+pub fn health_monitor_routes() -> Router<AppState> {
+    Router::new().route(
+        "/api/health-monitor/status",
+        get(crate::health_monitor::get_health_monitor_status),
+    )
+}
+
 pub fn migration_routes() -> Router<AppState> {
     Router::new()
-        .route("/api/migrations", post(handlers::migrations::create_migration).get(handlers::migrations::get_migrations))
-        .route("/api/migrations/:id", put(handlers::migrations::update_migration).get(handlers::migrations::get_migration))
+        .route(
+            "/api/admin/migrations/status",
+            get(migration_handlers::get_migration_status),
+        )
+        .route(
+            "/api/admin/migrations/register",
+            post(migration_handlers::register_migration),
+        )
+        .route(
+            "/api/admin/migrations/validate",
+            get(migration_handlers::validate_migrations),
+        )
+        .route(
+            "/api/admin/migrations/lock",
+            get(migration_handlers::get_lock_status),
+        )
+        .route(
+            "/api/admin/migrations/:version",
+            get(migration_handlers::get_migration_version),
+        )
+        .route(
+            "/api/admin/migrations/:version/rollback",
+            post(migration_handlers::rollback_migration),
+        )
+}
+
+pub fn compatibility_dashboard_routes() -> Router<AppState> {
+    Router::new().route(
+        "/api/compatibility-dashboard",
+        get(compatibility_testing_handlers::get_compatibility_dashboard),
+    )
+}
+
+pub fn canary_routes() -> Router<AppState> {
+    Router::new()
+        // Contract-scoped canary endpoints
+        .route(
+            "/api/contracts/:id/canary",
+            get(canary_handlers::list_canaries).post(canary_handlers::create_canary),
+        )
+        // Canary-specific endpoints
+        .route("/api/canary/:canary_id", get(canary_handlers::get_canary))
+        .route(
+            "/api/canary/:canary_id/advance",
+            post(canary_handlers::advance_canary),
+        )
+        .route(
+            "/api/canary/:canary_id/rollback",
+            post(canary_handlers::rollback_canary),
+        )
+        .route(
+            "/api/canary/:canary_id/complete",
+            post(canary_handlers::complete_canary),
+        )
+        .route(
+            "/api/canary/:canary_id/metrics",
+            get(canary_handlers::list_canary_metrics).post(canary_handlers::record_canary_metric),
+        )
+}
+
+pub fn ab_test_routes() -> Router<AppState> {
+    Router::new()
+        // Contract-scoped A/B test endpoints
+        .route(
+            "/api/contracts/:id/ab-tests",
+            get(ab_test_handlers::list_ab_tests).post(ab_test_handlers::create_ab_test),
+        )
+        // A/B test-specific endpoints
+        .route("/api/ab-tests/:test_id", get(ab_test_handlers::get_ab_test))
+        .route(
+            "/api/ab-tests/:test_id/start",
+            post(ab_test_handlers::start_ab_test),
+        )
+        .route(
+            "/api/ab-tests/:test_id/stop",
+            post(ab_test_handlers::stop_ab_test),
+        )
+        .route(
+            "/api/ab-tests/:test_id/cancel",
+            post(ab_test_handlers::cancel_ab_test),
+        )
+        .route(
+            "/api/ab-tests/:test_id/metrics",
+            post(ab_test_handlers::record_ab_test_metric),
+        )
+        .route(
+            "/api/ab-tests/:test_id/results",
+            get(ab_test_handlers::get_ab_test_results),
+        )
+}
+
+pub fn performance_routes() -> Router<AppState> {
+    Router::new()
+        // Contract-scoped performance endpoints
+        .route(
+            "/api/contracts/:id/perf/benchmarks",
+            get(performance_handlers::list_benchmarks).post(performance_handlers::record_benchmark),
+        )
+        .route(
+            "/api/contracts/:id/perf/metrics",
+            get(performance_handlers::list_metrics).post(performance_handlers::record_metric),
+        )
+        .route(
+            "/api/contracts/:id/perf/comparison",
+            get(performance_handlers::get_performance_comparison),
+        )
+        .route(
+            "/api/contracts/:id/perf/anomalies",
+            get(performance_handlers::list_anomalies),
+        )
+        .route(
+            "/api/contracts/:id/perf/alerts",
+            get(performance_handlers::list_alerts),
+        )
+        .route(
+            "/api/contracts/:id/perf/alert-configs",
+            get(performance_handlers::list_alert_configs)
+                .post(performance_handlers::create_alert_config),
+        )
+        .route(
+            "/api/contracts/:id/perf/trends",
+            get(performance_handlers::list_trends),
+        )
+        .route(
+            "/api/contracts/:id/perf/summary",
+            get(performance_handlers::get_performance_summary),
+        )
+        // Alert-specific action endpoints
+        .route(
+            "/api/perf/alerts/:alert_id/acknowledge",
+            post(performance_handlers::acknowledge_alert),
+        )
+        .route(
+            "/api/perf/alerts/:alert_id/resolve",
+            post(performance_handlers::resolve_alert),
+        )
+}
+
+pub fn admin_routes() -> Router<AppState> {
+    Router::new()
+        .route("/api/admin/audit-logs", get(handlers::get_all_audit_logs))
+        .merge(migration_routes())
+        // Category management (issue #414) – admin-only write endpoints
+        .route(
+            "/api/admin/categories",
+            post(category_handlers::create_category),
+        )
+        .route(
+            "/api/admin/categories/:id",
+            put(category_handlers::update_category).delete(category_handlers::delete_category),
+        )
+        .route_layer(middleware::from_fn(auth::require_admin))
+}
+
+pub fn websocket_routes() -> Router<AppState> {
+    Router::new().route(
+        "/ws/contracts",
+        axum::routing::get(websocket::websocket_handler),
+    )
 }

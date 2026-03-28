@@ -13,20 +13,97 @@ mod incident_handlers;
 mod incident_routes;
 mod models;
 mod rate_limit;
+#![warn(unused_imports)]
+
+mod ab_test_handlers;
+mod aggregation;
+mod analytics;
+mod auth;
+mod auth_handlers;
+mod batch_verify_handlers;
+mod breaking_changes;
+mod cache;
+mod canary_handlers;
+mod compatibility_testing_handlers;
+mod contract_events;
+mod db_monitoring;
+
+mod activity_feed_handlers;
+mod activity_feed_routes;
+mod analytics_handlers;
+mod category_handlers;
+mod custom_metrics_handlers;
+mod dependency;
+mod dependency_handlers;
+mod deprecation_handlers;
+mod error;
+mod events;
+mod handlers;
+mod health;
+pub mod health_monitor;
+#[cfg(test)]
+mod health_tests;
+mod metrics;
+mod metrics_handler;
+mod migration_handlers;
+mod models;
+mod multisig_handlers;
+mod multisig_routes;
+mod onchain_verification;
+#[cfg(feature = "openapi")]
+mod openapi;
+mod org_handlers;
+mod performance_handlers;
+mod rate_limit;
+mod release_notes_handlers;
+mod release_notes_routes;
+pub mod request_tracing;
+mod resource_handlers;
+mod resource_tracking;
 mod routes;
-mod scoring;
+pub mod security_log;
+pub mod signing_handlers;
+mod similarity_handlers;
+mod simulation;
+mod simulation_handlers;
 mod state;
 
+mod type_safety;
+mod validation;
+mod websocket;
 
 use anyhow::Result;
-use axum::http::{header, HeaderValue, Method};
+use axum::extract::{Request, State};
+use axum::http::{header, HeaderValue, Method, StatusCode};
+use axum::response::Response;
 use axum::{middleware, Router};
 use dotenv::dotenv;
+use prometheus::Registry;
 use sqlx::postgres::PgPoolOptions;
 use std::net::SocketAddr;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
 use tower_http::cors::CorsLayer;
-use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
 
+async fn track_in_flight_middleware(
+    State(state): State<AppState>,
+    req: Request,
+    next: middleware::Next,
+) -> Result<Response, ApiError> {
+    if state.is_shutting_down.load(Ordering::Relaxed) {
+        return Err(ApiError::new(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "SERVICE_UNAVAILABLE",
+            "Service is shutting down and temporarily unavailable",
+        ));
+    }
+    crate::metrics::HTTP_IN_FLIGHT.inc();
+    let res = next.run(req).await;
+    crate::metrics::HTTP_IN_FLIGHT.dec();
+    Ok(res)
+}
+
+use crate::error::ApiError;
 use crate::rate_limit::RateLimitState;
 use crate::state::AppState;
 
@@ -35,90 +112,295 @@ async fn main() -> Result<()> {
     // Load environment variables
     dotenv().ok();
 
-    // Initialize tracing
-    tracing_subscriber::registry()
-        .with(
-            tracing_subscriber::EnvFilter::try_from_default_env()
-                .unwrap_or_else(|_| "api=debug,tower_http=debug".into()),
-        )
-        .with(tracing_subscriber::fmt::layer())
-        .init();
+    // Initialize structured JSON tracing (ELK/Splunk compatible)
+    request_tracing::init_json_tracing();
 
-    // Database connection
+    // Fail fast on startup when JWT configuration is invalid.
+    if let Err(err) = auth::AuthManager::from_env() {
+        tracing::error!(
+            error = %err,
+            "JWT authentication configuration is invalid. Set JWT_SECRET to a strong value with at least {} characters.",
+            auth::MIN_JWT_SECRET_LEN
+        );
+        return Err(anyhow::anyhow!(
+            "Invalid JWT authentication configuration: {}",
+            err
+        ));
+    }
+
+    // Database connection with dynamic pool size
     let database_url = std::env::var("DATABASE_URL").expect("DATABASE_URL must be set");
 
+    let logical_cores = std::thread::available_parallelism()
+        .map(|n| n.get())
+        .unwrap_or(4);
+
+    let default_max_pool = (logical_cores * 2).max(10);
+    let max_pool_size = std::env::var("DB_MAX_POOL_SIZE")
+        .ok()
+        .and_then(|s| s.parse::<u32>().ok())
+        .unwrap_or(default_max_pool as u32);
+
+    tracing::info!(
+        max_pool_size = max_pool_size,
+        logical_cores = logical_cores,
+        "Initializing database connection pool"
+    );
+
     let pool = PgPoolOptions::new()
-        .max_connections(5)
+        .max_connections(max_pool_size)
+        .acquire_timeout(std::time::Duration::from_secs(30))
         .connect(&database_url)
         .await?;
 
-    // Run migrations
-    sqlx::migrate!("../../database/migrations")
-        .run(&pool)
-        .await?;
+    // Run migrations (skip if SKIP_MIGRATIONS=true, useful when migrations were applied manually)
+    let skip_migrations = std::env::var("SKIP_MIGRATIONS")
+        .map(|v| v == "true" || v == "1")
+        .unwrap_or(false);
+
+    if skip_migrations {
+        tracing::info!("Skipping automatic migrations (SKIP_MIGRATIONS=true)");
+    } else {
+        sqlx::migrate!("../../database/migrations")
+            .run(&pool)
+            .await?;
+    }
 
     tracing::info!("Database connected and migrations applied");
+
+    // Check migration versioning state on startup (Issue #252)
+    migration_handlers::check_migrations_on_startup(&pool).await;
 
     // Spawn the hourly analytics aggregation background task
     aggregation::spawn_aggregation_task(pool.clone());
 
+    // Create prometheus registry for metrics
+    let registry = Registry::new();
+    if let Err(e) = crate::metrics::register_all(&registry) {
+        tracing::error!("Failed to register metrics: {}", e);
+    }
+
+    // Job engine omitted: optional dependency; add soroban_batch and uncomment to enable.
+    // let (job_engine, job_rx) = soroban_batch::engine::JobEngine::new();
+    // let job_engine = Arc::new(job_engine);
+    // tokio::spawn(async move { job_engine.clone().run_worker(job_rx).await });
+
     // Create app state
-    let state = AppState::new(pool);
+    let is_shutting_down = Arc::new(AtomicBool::new(false));
+    // Job engine: initialize for background batch processing
+    let (job_engine, job_rx) = soroban_batch::engine::JobEngine::new();
+    let job_engine = Arc::new(job_engine);
+    let je = job_engine.clone();
+    tokio::spawn(async move { je.run_worker(job_rx).await });
+
+    let state = AppState::new(pool.clone(), registry, job_engine, is_shutting_down.clone()).await;
+
+    // Spawn the background DB and cache monitoring task
+    db_monitoring::spawn_db_monitoring_task(pool.clone(), state.cache.clone());
+
+    // Spawn the health monitor background task (Issue #333)
+    let hm_state = state.clone();
+    let hm_status = state.health_monitor_status.clone();
+    tokio::spawn(async move {
+        health_monitor::run_health_monitor(hm_state, hm_status).await;
+    });
+
+    let network_state = state.clone();
+    tokio::spawn(async move {
+        handlers::run_network_catalog_refresh(network_state).await;
+    });
+
+    // Warm up the cache
+    state.cache.clone().warm_up(pool.clone());
+
     let rate_limit_state = RateLimitState::from_env();
+    rate_limit_state.spawn_eviction_task();
+
+    let allowed_origins = std::env::var("ALLOWED_ORIGINS").unwrap_or_else(|_| {
+        "http://localhost:3000,https://soroban-registry.vercel.app".to_string()
+    });
+
+    let origins: Vec<HeaderValue> = allowed_origins
+        .split(',')
+        .filter_map(|s| {
+            let s = s.trim();
+            if s.is_empty() {
+                None
+            } else {
+                Some(HeaderValue::from_str(s).expect("Invalid allowed origin"))
+            }
+        })
+        .collect();
 
     let cors = CorsLayer::new()
-        .allow_origin([
-            HeaderValue::from_static("http://localhost:3000"),
-            HeaderValue::from_static("https://soroban-registry.vercel.app"),
+        .allow_origin(origins)
+        .allow_methods([
+            Method::GET,
+            Method::POST,
+            Method::PATCH,
+            Method::DELETE,
+            Method::OPTIONS,
         ])
-        .allow_methods([Method::GET, Method::POST, Method::OPTIONS])
-        .allow_headers([header::CONTENT_TYPE, header::AUTHORIZATION]);
+        .allow_headers([
+            header::CONTENT_TYPE,
+            header::AUTHORIZATION,
+            crate::request_tracing::X_REQUEST_ID.clone(),
+            crate::request_tracing::X_CORRELATION_ID.clone(),
+        ])
+        .expose_headers([
+            crate::request_tracing::X_REQUEST_ID.clone(),
+            crate::request_tracing::X_CORRELATION_ID.clone(),
+        ]);
 
     // Build router
     let app = Router::new()
+        .merge(routes::auth_routes())
+        .merge(routes::organization_routes())
         .merge(routes::contract_routes())
         .merge(routes::publisher_routes())
         .merge(routes::health_routes())
         .merge(routes::migration_routes())
         .merge(incident_routes::incident_routes())
+        .merge(routes::network_routes())
+        .merge(routes::openapi_routes())
+        .merge(routes::health_monitor_routes())
+        .merge(routes::admin_routes())
+        .merge(routes::category_routes())
+        .merge(routes::compatibility_dashboard_routes())
+        .merge(routes::canary_routes())
+        .merge(routes::ab_test_routes())
+        .merge(routes::performance_routes())
+        .merge(routes::observability_routes())
+        .merge(routes::websocket_routes())
+        .merge(release_notes_routes::release_notes_routes())
+        .nest("/api", activity_feed_routes::routes())
         .fallback(handlers::route_not_found)
-        .layer(middleware::from_fn(request_logger))
+        .layer(middleware::from_fn(
+            validation::payload_size::payload_size_validation_middleware,
+        ))
+        .layer(middleware::from_fn(
+            validation::enhanced_extractors::validation_failure_tracking_middleware,
+        ))
+        .layer(middleware::from_fn_with_state(
+            state.clone(),
+            track_in_flight_middleware,
+        ))
         .layer(middleware::from_fn_with_state(
             rate_limit_state,
             rate_limit::rate_limit_middleware,
         ))
-        .layer(CorsLayer::permissive())
         .layer(cors)
-        .with_state(state);
+        .layer(middleware::from_fn(request_tracing::tracing_middleware))
+        .with_state(state.clone());
 
-    // Start server
-    let addr = SocketAddr::from(([0, 0, 0, 0], 3001));
+    // Start server (port configurable via PORT env var, default 3001)
+    let port: u16 = std::env::var("PORT")
+        .ok()
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(3001);
+    let addr = SocketAddr::from(([0, 0, 0, 0], port));
     tracing::info!("API server listening on {}", addr);
 
     let listener = tokio::net::TcpListener::bind(addr).await?;
-    axum::serve(
+    let (tx, mut rx) = tokio::sync::mpsc::channel::<()>(1);
+
+    let server = axum::serve(
         listener,
         app.into_make_service_with_connect_info::<SocketAddr>(),
     )
-    .await?;
+    .with_graceful_shutdown(async move {
+        let ctrl_c = async {
+            tokio::signal::ctrl_c()
+                .await
+                .expect("failed to install Ctrl+C handler");
+        };
+
+        #[cfg(unix)]
+        let terminate = async {
+            tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
+                .expect("failed to install signal handler")
+                .recv()
+                .await;
+        };
+
+        #[cfg(not(unix))]
+        let terminate = std::future::pending::<()>();
+
+        tokio::select! {
+            _ = ctrl_c => {},
+            _ = terminate => {},
+        }
+
+        tracing::info!(
+            "SIGTERM/SIGINT received. Failing health checks and stopping new requests..."
+        );
+        let _ = tx.send(()).await;
+    });
+
+    let server_task = tokio::spawn(async move {
+        if let Err(e) = server.await {
+            tracing::error!("Server error: {}", e);
+        }
+    });
+
+    if let Some(()) = rx.recv().await {
+        is_shutting_down.store(true, Ordering::SeqCst);
+        let initial_in_flight = crate::metrics::HTTP_IN_FLIGHT.get();
+        tracing::info!(
+            "Graceful shutdown initiated. In-flight requests: {}",
+            initial_in_flight
+        );
+
+        let timeout_secs = std::env::var("SHUTDOWN_TIMEOUT")
+            .unwrap_or_else(|_| "30".to_string())
+            .parse::<u64>()
+            .unwrap_or(30);
+
+        let start_time = std::time::Instant::now();
+        let timeout_duration = std::time::Duration::from_secs(timeout_secs);
+
+        let mut success = false;
+        loop {
+            let in_flight = crate::metrics::HTTP_IN_FLIGHT.get();
+            if in_flight == 0 {
+                tracing::info!(
+                    "All in-flight requests completed in {}ms. In-flight: 0",
+                    start_time.elapsed().as_millis()
+                );
+                success = true;
+                break;
+            }
+            if start_time.elapsed() > timeout_duration {
+                tracing::error!(
+                    "Graceful shutdown timeout ({}s) reached. {} requests still in-flight.",
+                    timeout_secs,
+                    in_flight
+                );
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        }
+
+        tracing::info!("Closing database connections cleanly...");
+        pool.close().await;
+
+        let shutdown_duration = start_time.elapsed();
+        tracing::info!(
+            "Shutdown complete. Duration: {}ms",
+            shutdown_duration.as_millis()
+        );
+
+        if success {
+            std::process::exit(0);
+        } else {
+            std::process::exit(1);
+        }
+    } else {
+        let _ = server_task.await;
+        tracing::info!("Closing database connections cleanly...");
+        pool.close().await;
+        tracing::info!("Shutdown complete");
+    }
 
     Ok(())
-}
-
-async fn request_logger(
-    req: axum::http::Request<axum::body::Body>,
-    next: middleware::Next,
-) -> axum::response::Response {
-    let method = req.method().clone();
-    let uri = req.uri().clone();
-    let start = std::time::Instant::now();
-
-    let response = next.run(req).await;
-
-    let elapsed = start.elapsed().as_millis();
-    let status = response.status().as_u16();
-
-    tracing::info!("{method} {uri} {status} {elapsed}ms");
-
-    response
 }

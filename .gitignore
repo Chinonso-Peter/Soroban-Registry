@@ -30,7 +30,8 @@ Thumbs.db
 
 # Rust
 target/
-Cargo.lock
+# Cargo.lock is committed for binary crates (api, cli) for reproducible builds
+# but regenerated for library crates
 **/*.rs.bk
 *.pdb
 
