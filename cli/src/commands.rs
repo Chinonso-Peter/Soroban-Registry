@@ -1943,11 +1943,22 @@ pub async fn info(
     let metadata: serde_json::Value = metadata_res.json().await?;
 
     // Extract genuine UUID if 'id' was a name or address
-    let contract_uuid = metadata["contract"]["id"]
-        .as_str()
+    let contract_uuid = metadata
+        .get("id")
+        .and_then(|v| v.as_str())
+        // Fallback to nested `contract.id` for backward compatibility
+        .or_else(|| metadata.get("contract").and_then(|c| c.get("id")).and_then(|v| v.as_str()))
         .context("Metadata missing contract ID")?;
-    let contract_address = metadata["contract"]["contract_id"]
-        .as_str()
+    let contract_address = metadata
+        .get("contract_id")
+        .and_then(|v| v.as_str())
+        // Fallback to nested `contract.contract_id` for backward compatibility
+        .or_else(|| {
+            metadata
+                .get("contract")
+                .and_then(|c| c.get("contract_id"))
+                .and_then(|v| v.as_str())
+        })
         .unwrap_or(id);
 
     // 2. Fetch ABI
