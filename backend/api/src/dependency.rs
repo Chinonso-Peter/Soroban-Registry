@@ -300,7 +300,10 @@ pub async fn build_dependency_graph(
         })
         .collect();
 
-    Ok(GraphResponse { nodes: contracts, edges })
+    Ok(GraphResponse {
+        nodes: contracts,
+        edges,
+    })
 }
 
 /// Resolve a dependency name/id to a contract UUID if it exists in the registry
