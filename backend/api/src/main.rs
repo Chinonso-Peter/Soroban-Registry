@@ -9,6 +9,7 @@ mod batch_verify_handlers;
 mod breaking_changes;
 mod cache;
 mod canary_handlers;
+mod contributor_handlers;
 mod compatibility_testing_handlers;
 mod contract_events;
 mod db_monitoring;
@@ -242,6 +243,7 @@ async fn main() -> Result<()> {
         .merge(routes::organization_routes())
         .merge(routes::contract_routes())
         .merge(routes::publisher_routes())
+        .merge(routes::contributor_routes())
         .merge(routes::health_routes())
         .merge(routes::network_routes())
         .merge(routes::openapi_routes())

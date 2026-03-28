@@ -3,9 +3,9 @@ use crate::openapi;
 use crate::{
     ab_test_handlers, auth, auth_handlers, batch_verify_handlers, breaking_changes,
     canary_handlers, category_handlers, compatibility_testing_handlers, contract_events,
-    custom_metrics_handlers, deprecation_handlers, handlers, metrics_handler, migration_handlers,
-    performance_handlers, resource_handlers, similarity_handlers, simulation_handlers,
-    state::AppState, websocket,
+    contributor_handlers, custom_metrics_handlers, deprecation_handlers, handlers,
+    metrics_handler, migration_handlers, performance_handlers, resource_handlers,
+    similarity_handlers, simulation_handlers, state::AppState, websocket,
 };
 
 use axum::{
@@ -265,6 +265,22 @@ pub fn publisher_routes() -> Router<AppState> {
         .route(
             "/api/publishers/:id/contracts",
             get(handlers::get_publisher_contracts),
+        )
+}
+
+pub fn contributor_routes() -> Router<AppState> {
+    Router::new()
+        .route(
+            "/api/contributors",
+            get(contributor_handlers::list_contributors).post(contributor_handlers::create_contributor),
+        )
+        .route(
+            "/api/contributors/:id",
+            get(contributor_handlers::get_contributor).put(contributor_handlers::update_contributor),
+        )
+        .route(
+            "/api/contributors/:id/contracts",
+            get(contributor_handlers::get_contributor_contracts),
         )
 }
 
