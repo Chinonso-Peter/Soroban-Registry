@@ -2,7 +2,7 @@ import React from 'react';
 import Link from 'next/link';
 import { Clock, ExternalLink } from 'lucide-react';
 
-export default function RecentAdditionsTimeline({ data }: { data: any[] }) {
+export default function RecentAdditionsTimeline({ data }: { data: Record<string, unknown>[] }) {
   if (!data || data.length === 0) {
     return <div className="h-full flex items-center justify-center text-muted-foreground text-sm">No recent additions</div>;
   }

@@ -2,7 +2,7 @@ import React from 'react';
 import Link from 'next/link';
 import { ArrowUpRight, Minus, ArrowDownRight } from 'lucide-react';
 
-export default function TrendingContractsTable({ data }: { data: any[] }) {
+export default function TrendingContractsTable({ data }: { data: Record<string, unknown>[] }) {
   if (!data || data.length === 0) {
     return <div className="h-32 flex items-center justify-center text-muted-foreground text-sm border-t border-border">No trending contracts available</div>;
   }

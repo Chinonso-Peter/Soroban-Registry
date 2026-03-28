@@ -12,7 +12,7 @@ export function useContractAutoRefresh(contractId?: string) {
     if (!contractId) return;
 
     // Subscribe to contract update events
-    const unsubscribe = subscribe('contract_updated', (data: any) => {
+    const unsubscribe = subscribe('contract_updated', (data: Record<string, unknown>) => {
       if (data.contractId === contractId) {
         // Invalidate query to trigger refetch
         queryClient.invalidateQueries({
@@ -28,7 +28,7 @@ export function useContractAutoRefresh(contractId?: string) {
     });
 
     // Subscribe to deployment events for new contract information
-    const unsubscribeDeploy = subscribe('contract_deployed', (data: any) => {
+    const unsubscribeDeploy = subscribe('contract_deployed', (data: Record<string, unknown>) => {
       if (data.contractId === contractId) {
         queryClient.invalidateQueries({
           queryKey: ['contract', contractId],

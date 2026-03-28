@@ -189,27 +189,6 @@ function ContractDetailsContent() {
     history: { label: "History", icon: History },
   };
 
-  if (!id) {
-    return (
-      <div className="min-h-screen bg-background text-foreground">
-        <Navbar />
-        <div className="max-w-4xl mx-auto px-4 py-10">
-          <div className="rounded-2xl border border-border bg-card p-6">
-            <div className="text-sm font-semibold text-foreground">Missing contract id</div>
-            <div className="mt-1 text-sm text-muted-foreground">Open this page from the contracts list.</div>
-            <div className="mt-4">
-              <Link
-                href="/contracts"
-                className="inline-flex items-center gap-2 rounded-xl border border-border bg-background px-3 py-2 text-sm font-semibold text-muted-foreground hover:text-foreground hover:bg-accent transition-colors"
-              >
-                Browse contracts
-              </Link>
-            </div>
-          </div>
-        </div>
-      </div>
-    );
-  }
   // Subscribe to real-time contract updates
   useContractAutoRefresh(id);
 
@@ -219,19 +198,20 @@ function ContractDetailsContent() {
     error,
   } = useQuery({
     queryKey: ["contract", id],
-    queryFn: () => api.getContract(id),
+    queryFn: () => api.getContract(id!),
+    enabled: !!id,
   });
 
   const { data: dependencies, isLoading: depsLoading } = useQuery({
     queryKey: ["contract-dependencies", id],
-    queryFn: () => api.getContractDependencies(id),
-    enabled: !!contract && activeTab === "overview",
+    queryFn: () => api.getContractDependencies(id!),
+    enabled: !!id && !!contract && activeTab === "overview",
   });
 
   const { data: versions = [] } = useQuery({
     queryKey: ["contract-versions", id],
-    queryFn: () => api.getContractVersions(id),
-    enabled: !!contract && ["source", "deployments", "history", "abi"].includes(activeTab),
+    queryFn: () => api.getContractVersions(id!),
+    enabled: !!id && !!contract && ["source", "deployments", "history", "abi"].includes(activeTab),
   });
 
   const latestVersion = useMemo(() => {
@@ -243,20 +223,20 @@ function ContractDetailsContent() {
 
   const { data: abiResponse, isLoading: abiLoading } = useQuery({
     queryKey: ["contract-abi", id, latestVersion?.version],
-    queryFn: () => api.getContractAbi(id, latestVersion?.version),
-    enabled: !!contract && activeTab === "abi",
+    queryFn: () => api.getContractAbi(id!, latestVersion?.version),
+    enabled: !!id && !!contract && activeTab === "abi",
   });
 
   const { data: analyticsData } = useQuery({
     queryKey: ["contract-analytics-summary", id],
-    queryFn: () => api.getContractAnalytics(id),
-    enabled: !!contract && ["analytics", "deployments"].includes(activeTab),
+    queryFn: () => api.getContractAnalytics(id!),
+    enabled: !!id && !!contract && ["analytics", "deployments"].includes(activeTab),
   });
 
   const { data: changelog } = useQuery({
     queryKey: ["contract-changelog", id],
-    queryFn: () => api.getContractChangelog(id),
-    enabled: !!contract && activeTab === "history",
+    queryFn: () => api.getContractChangelog(id!),
+    enabled: !!id && !!contract && activeTab === "history",
   });
 
   const sourceUrl = latestVersion?.source_url;
@@ -273,7 +253,7 @@ function ContractDetailsContent() {
       if (!res.ok) throw new Error("Unable to fetch source from source_url");
       return res.text();
     },
-    enabled: !!contract && activeTab === "source" && !!sourceQueryUrl,
+    enabled: !!id && !!contract && activeTab === "source" && !!sourceQueryUrl,
   });
 
   const depGraph = useMemo(
@@ -314,9 +294,31 @@ function ContractDetailsContent() {
 
   const { data: deprecationInfo } = useQuery({
     queryKey: ["contract-deprecation", id],
-    queryFn: () => api.getDeprecationInfo(id),
-    enabled: !!contract,
+    queryFn: () => api.getDeprecationInfo(id!),
+    enabled: !!id && !!contract,
   });
+
+  if (!id) {
+    return (
+      <div className="min-h-screen bg-background text-foreground">
+        <Navbar />
+        <div className="max-w-4xl mx-auto px-4 py-10">
+          <div className="rounded-2xl border border-border bg-card p-6">
+            <div className="text-sm font-semibold text-foreground">Missing contract id</div>
+            <div className="mt-1 text-sm text-muted-foreground">Open this page from the contracts list.</div>
+            <div className="mt-4">
+              <Link
+                href="/contracts"
+                className="inline-flex items-center gap-2 rounded-xl border border-border bg-background px-3 py-2 text-sm font-semibold text-muted-foreground hover:text-foreground hover:bg-accent transition-colors"
+              >
+                Browse contracts
+              </Link>
+            </div>
+          </div>
+        </div>
+      </div>
+    );
+  }
 
   if (isLoading) {
     return (

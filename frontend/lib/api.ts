@@ -598,14 +598,11 @@ export const api = {
     );
     if (params?.author) queryParams.append("author", params.author);
     params?.tags?.forEach((tag) => queryParams.append("tag", tag));
-    // Backend expects sort_by without underscores: createdat, updatedat, popularity, deployments, interactions, relevance
+    // Backend accepts sort_by as specified (e.g. created_at, updated_at, popularity, deployments).
+    // For legacy UI labels we keep a small compatibility mapping.
     if (params?.sort_by) {
       const backendSortBy =
-        params.sort_by === 'created_at' ? 'createdat'
-        : params.sort_by === 'updated_at' ? 'updatedat'
-        : params.sort_by === 'name' ? 'name'
-        : params.sort_by === 'downloads' ? 'interactions'
-        : params.sort_by;
+        params.sort_by === 'downloads' ? 'interactions' : params.sort_by;
       queryParams.append("sort_by", backendSortBy);
     }
     if (params?.sort_order) queryParams.append("sort_order", params.sort_order);
@@ -1553,7 +1550,7 @@ export type FieldOperator = 'eq' | 'ne' | 'gt' | 'lt' | 'in' | 'contains' | 'sta
 export interface QueryCondition {
   field: string;
   operator: FieldOperator;
-  value: any;
+  value: string | number | boolean | string[];
 }
 
 export type QueryNode = 

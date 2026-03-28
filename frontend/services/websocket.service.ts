@@ -1,10 +1,10 @@
-type MessageHandler = (data: any) => void;
+type MessageHandler = (data: unknown) => void;
 type ConnectionHandler = () => void;
-type ErrorHandler = (error: any) => void;
+type ErrorHandler = (error: unknown) => void;
 
 interface WebSocketMessage {
   type: string;
-  data: any;
+  data: unknown;
 }
 
 export class WebSocketService {

@@ -1,10 +1,6 @@
 'use client';
 
-import {
-    Package, GitBranch, ChevronDown, BarChart2, Users, Menu, X, Layers,
-    Search, Plus, Columns2, ShieldCheck, PieChart, User, Settings,
-    LogOut, Home, Zap, TrendingUp, Code2,
-} from 'lucide-react';
+import { Package, GitBranch, ChevronDown, BarChart2, Users, Menu, X, Layers, Search, Plus, Bell, Columns2, ShieldCheck, PieChart } from 'lucide-react';
 import Link from 'next/link';
 import { usePathname } from 'next/navigation';
 import React, { useState, useRef, useEffect, useCallback } from 'react';
@@ -212,8 +208,8 @@ export default function Navbar() {
         return () => window.removeEventListener('keydown', onKey);
     }, []);
 
-    // Focus trap in drawer
-    useTrapFocus(drawerRef, mobileOpen);
+    const isActive = (href: string) => pathname === href;
+    const isExploreActive = ['/publishers', '/stats', '/templates', '/analytics'].some(p => pathname.startsWith(p));
 
     const isActive = useCallback((href: string) => pathname === href, [pathname]);
     const isExploreActive = EXPLORE_LINKS.some(l => pathname.startsWith(l.href));
@@ -357,51 +353,63 @@ export default function Navbar() {
                                 onMouseEnter={onProfileEnter}
                                 onMouseLeave={onProfileLeave}
                             >
-                                <button
-                                    aria-haspopup="true"
-                                    aria-expanded={profileOpen}
-                                    aria-label="User menu"
-                                    className="flex items-center justify-center w-8 h-8 rounded-full bg-gradient-to-br from-primary/20 to-secondary/20 border border-border text-muted-foreground hover:text-foreground hover:border-primary/40 transition-all focus:outline-none focus:ring-2 focus:ring-primary/50"
-                                >
-                                    <User className="w-4 h-4" />
-                                </button>
-
-                                <div
-                                    className={`absolute top-full right-0 pt-1.5 transition-all duration-150 ${
-                                        profileOpen
-                                            ? 'opacity-100 translate-y-0 pointer-events-auto'
-                                            : 'opacity-0 -translate-y-2 pointer-events-none'
-                                    }`}
-                                >
-                                    <div className="w-52 rounded-xl border border-border bg-card shadow-xl shadow-black/12 overflow-hidden">
-                                        {/* Profile header */}
-                                        <div className="px-4 py-3 border-b border-border bg-accent/30">
-                                            <div className="flex items-center gap-2.5">
-                                                <div className="w-8 h-8 rounded-full bg-gradient-to-br from-primary/30 to-secondary/30 flex items-center justify-center border border-primary/20">
-                                                    <User className="w-4 h-4 text-primary" />
-                                                </div>
-                                                <div>
-                                                    <p className="text-sm font-semibold text-foreground leading-none">User Profile</p>
-                                                    <p className="text-xs text-muted-foreground mt-0.5">user@example.com</p>
-                                                </div>
-                                            </div>
-                                        </div>
-                                        <div className="py-1.5">
-                                            <Link href="/profile" className="flex items-center gap-2.5 px-4 py-2 text-[13px] text-muted-foreground hover:text-foreground hover:bg-accent transition-colors">
-                                                <User className="w-3.5 h-3.5" />
-                                                My Contracts
-                                            </Link>
-                                            <Link href="/settings" className="flex items-center gap-2.5 px-4 py-2 text-[13px] text-muted-foreground hover:text-foreground hover:bg-accent transition-colors">
-                                                <Settings className="w-3.5 h-3.5" />
-                                                Settings
-                                            </Link>
-                                        </div>
-                                        <div className="border-t border-border py-1.5">
-                                            <button className="w-full flex items-center gap-2.5 px-4 py-2 text-[13px] text-red-500 hover:bg-red-500/8 transition-colors">
-                                                <LogOut className="w-3.5 h-3.5" />
-                                                Sign Out
-                                            </button>
-                                        </div>
+                                <div className="rounded-lg border border-border bg-card shadow-lg shadow-black/8 overflow-hidden">
+                                    <div className="py-1">
+                                        <Link
+                                            href="/publishers"
+                                            className={`flex items-center gap-2.5 px-3 py-2 text-[13px] transition-colors ${
+                                                isActive('/publishers')
+                                                    ? 'text-primary bg-primary/5'
+                                                    : 'text-muted-foreground hover:text-foreground hover:bg-accent'
+                                            }`}
+                                        >
+                                            <Users className="w-3.5 h-3.5 text-primary/70" />
+                                            Publishers
+                                        </Link>
+                                        <Link
+                                            href="/stats"
+                                            className={`flex items-center gap-2.5 px-3 py-2 text-[13px] transition-colors ${
+                                                isActive('/stats')
+                                                    ? 'text-primary bg-primary/5'
+                                                    : 'text-muted-foreground hover:text-foreground hover:bg-accent'
+                                            }`}
+                                        >
+                                            <BarChart2 className="w-3.5 h-3.5 text-primary/70" />
+                                            Statistics
+                                        </Link>
+                                        <Link
+                                            href="/analytics"
+                                            className={`flex items-center gap-2.5 px-3 py-2 text-[13px] transition-colors ${
+                                                isActive('/analytics')
+                                                    ? 'text-primary bg-primary/5'
+                                                    : 'text-muted-foreground hover:text-foreground hover:bg-accent'
+                                            }`}
+                                        >
+                                            <PieChart className="w-3.5 h-3.5 text-primary/70" />
+                                            Analytics
+                                        </Link>
+                                        <Link
+                                            href="/templates"
+                                            className={`flex items-center gap-2.5 px-3 py-2 text-[13px] transition-colors ${
+                                                isActive('/templates')
+                                                    ? 'text-primary bg-primary/5'
+                                                    : 'text-muted-foreground hover:text-foreground hover:bg-accent'
+                                            }`}
+                                        >
+                                            <Layers className="w-3.5 h-3.5 text-primary/70" />
+                                            Templates
+                                        </Link>
+                                        <Link
+                                            href="/analytics"
+                                            className={`flex items-center gap-2.5 px-3 py-2 text-[13px] transition-colors ${
+                                                isActive('/analytics')
+                                                    ? 'text-primary bg-primary/5'
+                                                    : 'text-muted-foreground hover:text-foreground hover:bg-accent'
+                                            }`}
+                                        >
+                                            <TrendingUp className="w-3.5 h-3.5 text-primary/70" />
+                                            Analytics
+                                        </Link>
                                     </div>
                                 </div>
                             </div>
@@ -503,10 +511,15 @@ export default function Navbar() {
                         <p className="px-2 pb-2 text-[11px] font-semibold text-muted-foreground uppercase tracking-wider">Quick Links</p>
                         <div className="grid grid-cols-2 gap-1">
                             {[
-                                { href: '/',          label: 'Home',     icon: Home      },
-                                { href: '/contracts', label: 'Browse',   icon: Package   },
-                                { href: '/publish',   label: 'Publish',  icon: Plus      },
-                                { href: '/graph',     label: 'Graph',    icon: GitBranch },
+                                { href: '/contracts', label: 'Browse Contracts', icon: Search },
+                                { href: '/compare', label: 'Compare Contracts', icon: Columns2 },
+                                { href: '/verify-contract', label: 'Verify Contract', icon: ShieldCheck },
+                                { href: '/publishers', label: 'Publishers', icon: Users },
+                                { href: '/stats', label: 'Statistics', icon: BarChart2 },
+                                { href: '/analytics', label: 'Analytics', icon: PieChart },
+                                { href: '/templates', label: 'Templates', icon: Layers },
+                                { href: '/analytics', label: 'Search Analytics', icon: TrendingUp },
+                                { href: '/graph', label: 'Dependency Graph', icon: GitBranch },
                             ].map(({ href, label, icon: Icon }) => (
                                 <Link
                                     key={href}
