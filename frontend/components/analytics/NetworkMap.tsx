@@ -82,64 +82,72 @@ const NetworkMap: React.FC<NetworkMapProps> = ({ data }) => {
           <path d="M560,245 L680,245 L675,305 L565,305 Z" fill="var(--muted)" opacity={0.4} />
 
           {/* Region bubbles */}
-          {Object.entries(grouped).map(([region, points]) => {
-            const coords = REGION_COORDS[region];
-            if (!coords) return null;
-
-            const totalCount = points.reduce((s, p) => s + p.count, 0);
-            const radius = 10 + (totalCount / maxCount) * 28;
-            const isHovered = hovered === region;
-
-            // Show dominant network color
-            const dominant = points.reduce((a, b) => (a.count > b.count ? a : b));
-            const col = NETWORK_COLORS[dominant.network] ?? { bg: 'rgba(100,100,100,0.25)', dot: '#888' };
-
-            return (
-              <g
-                key={region}
-                onMouseEnter={() => setHovered(region)}
-                onMouseLeave={() => setHovered(null)}
-                className="cursor-pointer"
-              >
-                <circle
-                  cx={coords.x}
-                  cy={coords.y}
-                  r={radius + (isHovered ? 4 : 0)}
-                  fill={col.dot}
-                  opacity={isHovered ? 0.35 : 0.2}
-                  className="transition-all duration-200"
-                />
-                <circle
-                  cx={coords.x}
-                  cy={coords.y}
-                  r={isHovered ? 7 : 5}
-                  fill={col.dot}
-                  className="transition-all duration-200"
-                />
-                {isHovered && (
-                  <foreignObject
-                    x={coords.x + 10}
-                    y={coords.y - 36}
-                    width={180}
-                    height={80}
-                    className="overflow-visible"
-                  >
-                    <div className="bg-card border border-border rounded-lg p-2 shadow-lg text-xs">
-                      <p className="font-semibold text-foreground mb-1">{region}</p>
-                      {points.map((p) => (
-                        <div key={p.network} className="flex justify-between gap-3">
-                          <span className="text-muted-foreground">{p.network}</span>
-                          <span className="font-medium text-foreground">
-                            {p.count.toLocaleString()} ({p.percentage}%)
-                          </span>
-                        </div>
-                      ))}
-                    </div>
-                  </foreignObject>
-                )}
-              </g>
+          {(() => {
+            // Compute max over region totals to normalize bubble radii consistently
+            const regionTotals = Object.values(grouped).map((points) =>
+              points.reduce((sum, p) => sum + p.count, 0)
             );
-          })}
+            const maxRegionTotal = Math.max(...regionTotals, 1);
+
+            return Object.entries(grouped).map(([region, points]) => {
+              const coords = REGION_COORDS[region];
+              if (!coords) return null;
+
+              const totalCount = points.reduce((s, p) => s + p.count, 0);
+              const radius = 10 + (totalCount / maxRegionTotal) * 28;
+              const isHovered = hovered === region;
+
+              // Show dominant network color
+              const dominant = points.reduce((a, b) => (a.count > b.count ? a : b));
+              const col = NETWORK_COLORS[dominant.network] ?? { bg: 'rgba(100,100,100,0.25)', dot: '#888' };
+
+              return (
+                <g
+                  key={region}
+                  onMouseEnter={() => setHovered(region)}
+                  onMouseLeave={() => setHovered(null)}
+                  className="cursor-pointer"
+                >
+                  <circle
+                    cx={coords.x}
+                    cy={coords.y}
+                    r={radius + (isHovered ? 4 : 0)}
+                    fill={col.dot}
+                    opacity={isHovered ? 0.35 : 0.2}
+                    className="transition-all duration-200"
+                  />
+                  <circle
+                    cx={coords.x}
+                    cy={coords.y}
+                    r={isHovered ? 7 : 5}
+                    fill={col.dot}
+                    className="transition-all duration-200"
+                  />
+                  {isHovered && (
+                    <foreignObject
+                      x={coords.x + 10}
+                      y={coords.y - 36}
+                      width={180}
+                      height={80}
+                      className="overflow-visible"
+                    >
+                      <div className="bg-card border border-border rounded-lg p-2 shadow-lg text-xs">
+                        <p className="font-semibold text-foreground mb-1">{region}</p>
+                        {points.map((p) => (
+                          <div key={p.network} className="flex justify-between gap-3">
+                            <span className="text-muted-foreground">{p.network}</span>
+                            <span className="font-medium text-foreground">
+                              {p.count.toLocaleString()} ({p.percentage}%)
+                            </span>
+                          </div>
+                        ))}
+                      </div>
+                    </foreignObject>
+                  )}
+                </g>
+              );
+            });
+          })()}
         </svg>
       </div>
 
