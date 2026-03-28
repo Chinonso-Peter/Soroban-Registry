@@ -35,6 +35,7 @@ pub struct GetContractQuery {
 use crate::{
     analytics,
     breaking_changes::{diff_abi, has_breaking_changes, resolve_abi},
+    contract_events::{ContractEventEnvelope, ContractEventVisibility},
     dependency,
     error::{ApiError, ApiResult},
     state::AppState,
@@ -1405,6 +1406,16 @@ pub async fn create_contract_version(
     )
     .await;
 
+    if let Ok(contract) = sqlx::query_as::<_, Contract>("SELECT * FROM contracts WHERE id = $1")
+        .bind(contract_uuid)
+        .fetch_one(&state.db)
+        .await
+    {
+        state
+            .contract_events
+            .publish(ContractEventEnvelope::version_created(&contract, &version_row));
+    }
+
     Ok(Json(version_row))
 }
 
@@ -1639,6 +1650,11 @@ pub async fn publish_contract(
         Some(json!({ "name": contract.name })),
     )
     .await;
+
+    state.contract_events.publish(ContractEventEnvelope::deployed(
+        &contract,
+        Some(publisher.stellar_address.clone()),
+    ));
 
     Ok(Json(contract))
 }
@@ -2635,12 +2651,13 @@ pub async fn update_contract_metadata(
     }
 
     if !changes.is_empty() {
+        let changes_value = Value::Object(changes.clone());
         write_contract_audit_log(
             &state.db,
             AuditActionType::MetadataUpdated,
             after.id,
             req.user_id.unwrap_or(before.publisher_id),
-            Value::Object(changes.clone()),
+            changes_value.clone(),
             &extract_ip_address(&headers),
         )
         .await
@@ -2656,6 +2673,12 @@ pub async fn update_contract_metadata(
             Some(json!({ "changes": changes })),
         )
         .await;
+
+        state.contract_events.publish(ContractEventEnvelope::metadata_updated(
+            &after,
+            changes_value,
+            ContractEventVisibility::Public,
+        ));
     }
 
     Ok(Json(after))
@@ -2884,6 +2907,33 @@ pub async fn update_contract_status(
         )
         .await
         .map_err(|err| db_internal_error("record status interaction", err))?;
+    }
+
+    let contract_after: Contract = sqlx::query_as("SELECT * FROM contracts WHERE id = $1")
+        .bind(contract_uuid)
+        .fetch_one(&state.db)
+        .await
+        .map_err(|err| db_internal_error("fetch contract after status update", err))?;
+
+    state.contract_events.publish(ContractEventEnvelope::status_updated(
+        &contract_after,
+        normalized_status.clone(),
+        is_verified_after,
+        None,
+        ContractEventVisibility::Public,
+    ));
+
+    if req.error_message.is_some() {
+        state.contract_events.publish(ContractEventEnvelope::status_updated(
+            &contract_after,
+            normalized_status.clone(),
+            is_verified_after,
+            Some(json!({
+                "error_message": req.error_message,
+                "publisher_id": contract.publisher_id,
+            })),
+            ContractEventVisibility::Private,
+        ));
     }
 
     Ok(Json(json!({
