@@ -1,9 +1,9 @@
+use soroban_registry_cli::profiler::{generate_flame_graph, FunctionProfile, ProfileData};
 use std::collections::HashMap;
-use std::time::Duration;
-use tempfile::NamedTempFile;
-use sysinfo::{ProcessExt, System, SystemExt};
-use soroban_registry_cli::profiler::{ProfileData, FunctionProfile, generate_flame_graph};
 use std::fs;
+use std::time::Duration;
+use sysinfo::{ProcessExt, System, SystemExt};
+use tempfile::NamedTempFile;
 
 fn make_large_profile(n: usize) -> ProfileData {
     let mut functions = HashMap::new();

@@ -1,6 +1,7 @@
 import { Contract } from '@/lib/api';
-import { Clock, ExternalLink, Tag } from 'lucide-react';
+import { CheckCircle2, Clock, Copy, ExternalLink, Layers3, Tag, Check } from 'lucide-react';
 import Link from 'next/link';
+import { useRouter } from 'next/navigation';
 import React from 'react';
 import HealthWidget from './HealthWidget';
 import { useAnalytics } from '@/hooks/useAnalytics';

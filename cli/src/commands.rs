@@ -22,10 +22,7 @@ use crate::patch::{PatchManager, Severity};
 use crate::profiler;
 use crate::test_framework;
 
-pub fn generate_flame_graph_file(
-    profile: &profiler::ProfileData,
-    output_path: &str,
-) -> Result<()> {
+pub fn generate_flame_graph_file(profile: &profiler::ProfileData, output_path: &str) -> Result<()> {
     profiler::generate_flame_graph(profile, Path::new(output_path))
 }
 
@@ -66,17 +63,16 @@ pub fn profile(
     );
 
     if let Some(output_path) = output {
-        let profile_json =
-            serde_json::to_string_pretty(&profile_data).context("Failed to serialize profile data")?;
+        let profile_json = serde_json::to_string_pretty(&profile_data)
+            .context("Failed to serialize profile data")?;
         fs::write(output_path, profile_json)
             .with_context(|| format!("Failed to write profile output: {}", output_path))?;
         println!("{} Profile output written to {}", "✓".green(), output_path);
     }
 
     if let Some(flamegraph_path) = flamegraph {
-        generate_flame_graph_file(&profile_data, flamegraph_path).with_context(|| {
-            format!("Failed to generate flame graph at {}", flamegraph_path)
-        })?;
+        generate_flame_graph_file(&profile_data, flamegraph_path)
+            .with_context(|| format!("Failed to generate flame graph at {}", flamegraph_path))?;
         println!("{} Flame graph written to {}", "✓".green(), flamegraph_path);
     }
 
@@ -119,6 +115,7 @@ pub fn profile(
     Ok(())
 }
 
+#[allow(clippy::too_many_arguments)]
 pub async fn search(
     api_url: &str,
     query: &str,
@@ -133,27 +130,29 @@ pub async fn search(
     let t0 = std::time::Instant::now();
     let client = reqwest::Client::new();
 
-    let mut url = format!(
-        "{}/api/contracts?query={}&limit={}&offset={}",
-        api_url, query, limit, offset
-    );
+    let mut params: Vec<(&str, String)> = vec![
+        ("query", query.to_string()),
+        ("limit", limit.to_string()),
+        ("offset", offset.to_string()),
+    ];
 
     if !networks.is_empty() {
-        url.push_str(&format!("&networks={}", networks.join(",")));
+        params.push(("networks", networks.join(",")));
     } else {
-        url.push_str(&format!("&network={}", network));
+        params.push(("network", network.to_string()));
     }
 
     if verified_only {
-        url.push_str("&verified_only=true");
+        params.push(("verified_only", "true".to_string()));
     }
 
     if let Some(cat) = category {
-        url.push_str(&format!("&category={}", cat));
+        params.push(("category", cat.to_string()));
     }
 
     let response = client
-        .get(&url)
+        .get(format!("{}/api/contracts", api_url))
+        .query(&params)
         .send()
         .await
         .context("Failed to search contracts")?;
@@ -266,7 +265,11 @@ pub async fn search(
 
         let name_cell = crate::table_format::highlight_match(&name, query);
         let net_cell = net.bright_blue().to_string();
-        let cat_display = if cat.is_empty() { "—".to_string() } else { cat };
+        let cat_display = if cat.is_empty() {
+            "—".to_string()
+        } else {
+            cat
+        };
         let cat_cell = crate::table_format::highlight_match(&cat_display, query);
         let ver_cell = if is_verified {
             "✓ Verified".green().to_string()
@@ -280,7 +283,10 @@ pub async fn search(
 
     let col_widths = [name_w, net_w, cat_w, ver_w, link_w];
     let headers = ["Name", "Network", "Category", "Verified", "Links"];
-    print!("{}", crate::table_format::render_table(&headers, &col_widths, &rows));
+    print!(
+        "{}",
+        crate::table_format::render_table(&headers, &col_widths, &rows)
+    );
 
     let elapsed_ms = t0.elapsed().as_millis();
     println!(
@@ -295,7 +301,12 @@ pub async fn search(
 }
 
 /// Analyze two contract versions or schema files for breaking changes.
-pub async fn upgrade_analyze(api_url: &str, old_id: &str, new_id: &str, json_out: bool) -> Result<()> {
+pub async fn upgrade_analyze(
+    api_url: &str,
+    old_id: &str,
+    new_id: &str,
+    json_out: bool,
+) -> Result<()> {
     use reqwest::StatusCode;
     use shared::upgrade::{compare_schemas, Schema};
 
@@ -316,7 +327,12 @@ pub async fn upgrade_analyze(api_url: &str, old_id: &str, new_id: &str, json_out
             println!("{}", serde_json::to_string_pretty(&findings)?);
         } else {
             for f in findings {
-                println!("[{:?}] {} - {}", f.severity, f.field.unwrap_or_default(), f.message);
+                println!(
+                    "[{:?}] {} - {}",
+                    f.severity,
+                    f.field.unwrap_or_default(),
+                    f.message
+                );
             }
         }
         return Ok(());
@@ -325,32 +341,57 @@ pub async fn upgrade_analyze(api_url: &str, old_id: &str, new_id: &str, json_out
     // Otherwise try to fetch versions from the API (assumes endpoint exists)
     let client = reqwest::Client::new();
     let url = format!("{}/api/contract_versions/{}", api_url, old_id);
-    let old_res = client.get(&url).send().await.context("failed to fetch old version")?;
+    let old_res = client
+        .get(&url)
+        .send()
+        .await
+        .context("failed to fetch old version")?;
     if old_res.status() == StatusCode::NOT_FOUND {
-        anyhow::bail!("Old version {} not found via API. Try passing a local schema JSON file instead.", old_id);
+        anyhow::bail!(
+            "Old version {} not found via API. Try passing a local schema JSON file instead.",
+            old_id
+        );
     }
     let old_json: serde_json::Value = old_res.json().await?;
 
     let url2 = format!("{}/api/contract_versions/{}", api_url, new_id);
-    let new_res = client.get(&url2).send().await.context("failed to fetch new version")?;
+    let new_res = client
+        .get(&url2)
+        .send()
+        .await
+        .context("failed to fetch new version")?;
     if new_res.status() == StatusCode::NOT_FOUND {
-        anyhow::bail!("New version {} not found via API. Try passing a local schema JSON file instead.", new_id);
+        anyhow::bail!(
+            "New version {} not found via API. Try passing a local schema JSON file instead.",
+            new_id
+        );
     }
     let new_json: serde_json::Value = new_res.json().await?;
 
     // Expect the API to expose a simple schema JSON in `state_schema` field; fall back to error.
-    let old_schema_str = old_json["state_schema"].as_str().ok_or_else(|| anyhow::anyhow!("API did not return state_schema for old version"))?;
-    let new_schema_str = new_json["state_schema"].as_str().ok_or_else(|| anyhow::anyhow!("API did not return state_schema for new version"))?;
+    let old_schema_str = old_json["state_schema"]
+        .as_str()
+        .ok_or_else(|| anyhow::anyhow!("API did not return state_schema for old version"))?;
+    let new_schema_str = new_json["state_schema"]
+        .as_str()
+        .ok_or_else(|| anyhow::anyhow!("API did not return state_schema for new version"))?;
 
-    let old_schema = Schema::from_json_bytes(old_schema_str.as_bytes()).context("failed to parse old schema")?;
-    let new_schema = Schema::from_json_bytes(new_schema_str.as_bytes()).context("failed to parse new schema")?;
+    let old_schema =
+        Schema::from_json_bytes(old_schema_str.as_bytes()).context("failed to parse old schema")?;
+    let new_schema =
+        Schema::from_json_bytes(new_schema_str.as_bytes()).context("failed to parse new schema")?;
 
     let findings = compare_schemas(&old_schema, &new_schema);
     if json_out {
         println!("{}", serde_json::to_string_pretty(&findings)?);
     } else {
         for f in findings {
-            println!("[{:?}] {} - {}", f.severity, f.field.unwrap_or_default(), f.message);
+            println!(
+                "[{:?}] {} - {}",
+                f.severity,
+                f.field.unwrap_or_default(),
+                f.message
+            );
         }
     }
 
@@ -380,7 +421,13 @@ mod upgrade_analyze_tests {
         write!(f2, "{}", new_schema).unwrap();
 
         // Should return Ok() even if findings include errors; function prints results.
-        let res = upgrade_analyze("http://localhost:3001", old_path.to_str().unwrap(), new_path.to_str().unwrap(), true).await;
+        let res = upgrade_analyze(
+            "http://localhost:3001",
+            old_path.to_str().unwrap(),
+            new_path.to_str().unwrap(),
+            true,
+        )
+        .await;
         assert!(res.is_ok());
     }
 }
@@ -419,6 +466,7 @@ fn resolve_smart_routing(current_network: Network) -> String {
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 pub async fn publish(
     api_url: &str,
     contract_id: &str,
@@ -479,7 +527,7 @@ pub async fn publish(
     Ok(())
 }
 
-pub async fn list(api_url: &str, limit: usize, network: Network, json: bool,) -> Result<()> {
+pub async fn list(api_url: &str, limit: usize, network: Network, json: bool) -> Result<()> {
     let client = reqwest::Client::new();
     let url = format!(
         "{}/api/contracts?page_size={}&network={}",
@@ -495,17 +543,22 @@ pub async fn list(api_url: &str, limit: usize, network: Network, json: bool,) ->
     let data: serde_json::Value = response.json().await?;
     let items = data["items"].as_array().context("Invalid response")?;
 
-	if json {
+    if json {
         let contracts: Vec<serde_json::Value> = items
             .iter()
-            .map(|c| -> Result<_> { Ok(serde_json::json!({
-                "id":          crate::conversions::as_str(&c["contract_id"], "contract_id")?,
-                "name":        crate::conversions::as_str(&c["name"], "name")?,
-                "is_verified": crate::conversions::as_bool(&c["is_verified"], "is_verified")?,
-                "network":     crate::conversions::as_str(&c["network"], "network")?,
-            })) })
+            .map(|c| -> Result<_> {
+                Ok(serde_json::json!({
+                    "id":          crate::conversions::as_str(&c["contract_id"], "contract_id")?,
+                    "name":        crate::conversions::as_str(&c["name"], "name")?,
+                    "is_verified": crate::conversions::as_bool(&c["is_verified"], "is_verified")?,
+                    "network":     crate::conversions::as_str(&c["network"], "network")?,
+                }))
+            })
             .collect::<Result<_, _>>()?;
-        println!("{}", serde_json::to_string_pretty(&serde_json::json!({ "contracts": contracts }))?);
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&serde_json::json!({ "contracts": contracts }))?
+        );
         return Ok(());
     }
 
@@ -584,7 +637,8 @@ pub async fn breaking_changes(api_url: &str, old_id: &str, new_id: &str, json: b
 
     let breaking = crate::conversions::as_bool(&report["breaking"], "breaking")?;
     let breaking_count = crate::conversions::as_u64(&report["breaking_count"], "breaking_count")?;
-    let non_breaking_count = crate::conversions::as_u64(&report["non_breaking_count"], "non_breaking_count")?;
+    let non_breaking_count =
+        crate::conversions::as_u64(&report["non_breaking_count"], "non_breaking_count")?;
 
     let header = if breaking {
         "Breaking changes detected".red().bold()
@@ -617,7 +671,6 @@ pub async fn breaking_changes(api_url: &str, old_id: &str, new_id: &str, json: b
     Ok(())
 }
 
-
 pub async fn migrate(
     api_url: &str,
     contract_id: &str,
@@ -644,8 +697,14 @@ pub async fn migrate(
     println!("WASM Hash: {}", wasm_hash.bright_black());
 
     if dry_run {
-        println!("\n{}", "Dry run enabled: not contacting the registry API.".yellow());
-        println!("{}", "✓ Migration simulation complete (dry-run).".green().bold());
+        println!(
+            "\n{}",
+            "Dry run enabled: not contacting the registry API.".yellow()
+        );
+        println!(
+            "{}",
+            "✓ Migration simulation complete (dry-run).".green().bold()
+        );
         return Ok(());
     }
 
@@ -750,12 +809,7 @@ pub async fn migrate(
     Ok(())
 }
 
-pub async fn export(
-    _api_url: &str,
-    id: &str,
-    output: &str,
-    contract_dir: &str,
-) -> Result<()> {
+pub async fn export(_api_url: &str, id: &str, output: &str, contract_dir: &str) -> Result<()> {
     let source = std::path::Path::new(contract_dir);
     anyhow::ensure!(
         source.is_dir(),
@@ -772,7 +826,7 @@ pub async fn export(
     println!("{}", "✓ Export complete!".green().bold());
     println!("  {}: {}", "Output".bold(), output);
     println!("  {}: {}", "Contract".bold(), id.bright_black());
-    println!("  {}: {}\n", "Name".bold(), "contract");
+    println!("  {}: contract\n", "Name".bold());
     Ok(())
 }
 
@@ -897,21 +951,24 @@ pub async fn trust_score(api_url: &str, contract_id: &str, network: Network) -> 
         anyhow::bail!("Failed to get trust score ({}): {}", status, body);
     }
 
-    let data: serde_json::Value = resp.json().await.context("Failed to parse trust score response")?;
+    let data: serde_json::Value = resp
+        .json()
+        .await
+        .context("Failed to parse trust score response")?;
 
     // ── Header ────────────────────────────────────────────────────────────────
-    let name       = crate::conversions::as_str(&data["contract_name"], "contract_name")?;
-    let score      = crate::conversions::as_f64(&data["score"], "score")?;
-    let badge      = crate::conversions::as_str(&data["badge"], "badge")?;
+    let name = crate::conversions::as_str(&data["contract_name"], "contract_name")?;
+    let score = crate::conversions::as_f64(&data["score"], "score")?;
+    let badge = crate::conversions::as_str(&data["badge"], "badge")?;
     let badge_icon = crate::conversions::as_str(&data["badge_icon"], "badge_icon")?;
-    let summary    = crate::conversions::as_str(&data["summary"], "summary")?;
+    let summary = crate::conversions::as_str(&data["summary"], "summary")?;
 
     println!("\n{}", "─".repeat(56));
     println!("  Trust Score — {}", name.bold());
     println!("{}", "─".repeat(56));
     println!("  Score : {:.0}/100", score);
     println!("  Badge : {} {}", badge_icon, badge.bold());
-    println!("  {}",  summary);
+    println!("  {}", summary);
     println!("{}", "─".repeat(56));
 
     // ── Factor breakdown ──────────────────────────────────────────────────────
@@ -919,9 +976,9 @@ pub async fn trust_score(api_url: &str, contract_id: &str, network: Network) -> 
 
     if let Some(factors) = data["factors"].as_array() {
         for factor in factors {
-            let fname   = crate::conversions::as_str(&factor["name"], "name")?;
-            let earned  = crate::conversions::as_f64(&factor["points_earned"], "points_earned")?;
-            let max     = crate::conversions::as_f64(&factor["points_max"], "points_max")?;
+            let fname = crate::conversions::as_str(&factor["name"], "name")?;
+            let earned = crate::conversions::as_f64(&factor["points_earned"], "points_earned")?;
+            let max = crate::conversions::as_f64(&factor["points_max"], "points_max")?;
             let explain = crate::conversions::as_str(&factor["explanation"], "explanation")?;
 
             // Mini progress bar (10 chars)
@@ -1034,9 +1091,10 @@ pub async fn deps_list(api_url: &str, contract_id: &str) -> Result<()> {
             let contract_id = node["contract_id"].as_str().unwrap_or("");
 
             let name = crate::conversions::as_str(&node["name"], "name")?;
-            let constraint = crate::conversions::as_str(&node["constraint_to_parent"], "constraint_to_parent")?;
+            let constraint =
+                crate::conversions::as_str(&node["constraint_to_parent"], "constraint_to_parent")?;
             let contract_id = crate::conversions::as_str(&node["contract_id"], "contract_id")?;
-            
+
             let is_node_last = i == nodes.len() - 1;
             let marker = if is_node_last {
                 "└──"
@@ -1061,9 +1119,10 @@ pub async fn deps_list(api_url: &str, contract_id: &str) -> Result<()> {
                 if !children.is_empty() {
                     let new_prefix =
                         format!("{}{}", prefix, if is_node_last { "    " } else { "│   " });
-                    print_tree(children, &new_prefix, true);
-                     let new_prefix = format!("{}{}", prefix, if is_node_last { "    " } else { "│   " });
-                     print_tree(children, &new_prefix, true)?;
+                    let _ = print_tree(children, &new_prefix, true);
+                    let new_prefix =
+                        format!("{}{}", prefix, if is_node_last { "    " } else { "│   " });
+                    print_tree(children, &new_prefix, true)?;
                 }
             }
         }
@@ -1274,12 +1333,22 @@ pub fn incident_trigger(contract_id: &str, severity_str: &str) -> Result<()> {
 
 pub async fn config_get(api_url: &str, contract_id: &str, environment: &str) -> Result<()> {
     let client = reqwest::Client::new();
-    let url = format!("{}/api/contracts/{}/config?environment={}", api_url, contract_id, environment);
+    let url = format!(
+        "{}/api/contracts/{}/config?environment={}",
+        api_url, contract_id, environment
+    );
 
-    let response = client.get(&url).send().await.context("Failed to fetch configuration")?;
+    let response = client
+        .get(&url)
+        .send()
+        .await
+        .context("Failed to fetch configuration")?;
 
     if !response.status().is_success() {
-        anyhow::bail!("Failed to get config: {}", response.text().await.unwrap_or_default());
+        anyhow::bail!(
+            "Failed to get config: {}",
+            response.text().await.unwrap_or_default()
+        );
     }
 
     let config: serde_json::Value = response.json().await?;
@@ -1288,11 +1357,28 @@ pub async fn config_get(api_url: &str, contract_id: &str, environment: &str) -> 
     println!("{}", "=".repeat(80).cyan());
     println!("{}: {}", "Contract ID".bold(), contract_id);
     println!("{}: {}", "Environment".bold(), environment);
-    println!("{}: {}", "Version".bold(), crate::conversions::as_i64(&config["version"], "version")?);
-    println!("{}: {}", "Contains Secrets".bold(), crate::conversions::as_bool(&config["has_secrets"], "has_secrets")?);
-    println!("{}: {}", "Created By".bold(), crate::conversions::as_str(&config["created_by"], "created_by")?);
+    println!(
+        "{}: {}",
+        "Version".bold(),
+        crate::conversions::as_i64(&config["version"], "version")?
+    );
+    println!(
+        "{}: {}",
+        "Contains Secrets".bold(),
+        crate::conversions::as_bool(&config["has_secrets"], "has_secrets")?
+    );
+    println!(
+        "{}: {}",
+        "Created By".bold(),
+        crate::conversions::as_str(&config["created_by"], "created_by")?
+    );
     println!("{}:", "Config Data".bold());
-    println!("{}", serde_json::to_string_pretty(&config["config_data"]).unwrap_or_default().green());
+    println!(
+        "{}",
+        serde_json::to_string_pretty(&config["config_data"])
+            .unwrap_or_default()
+            .green()
+    );
     println!();
 
     Ok(())
@@ -1316,23 +1402,39 @@ pub async fn config_set(
     });
 
     if let Some(sec) = secrets_data {
-        let sec_json: serde_json::Value = serde_json::from_str(sec).context("Invalid secrets JSON")?;
+        let sec_json: serde_json::Value =
+            serde_json::from_str(sec).context("Invalid secrets JSON")?;
         payload["secrets_data"] = sec_json;
     }
 
     println!("\n{}", "Publishing configuration...".bold().cyan());
 
-    let response = client.post(&url).json(&payload).send().await.context("Failed to set configuration")?;
+    let response = client
+        .post(&url)
+        .json(&payload)
+        .send()
+        .await
+        .context("Failed to set configuration")?;
 
     if !response.status().is_success() {
-        anyhow::bail!("Failed to set config: {}", response.text().await.unwrap_or_default());
+        anyhow::bail!(
+            "Failed to set config: {}",
+            response.text().await.unwrap_or_default()
+        );
     }
 
     let config: serde_json::Value = response.json().await?;
 
-    println!("{}", "✓ Configuration published successfully!".green().bold());
+    println!(
+        "{}",
+        "✓ Configuration published successfully!".green().bold()
+    );
     println!("  {}: {}", "Environment".bold(), environment);
-    println!("  {}: {}", "New Version".bold(), crate::conversions::as_i64(&config["version"], "version")?);
+    println!(
+        "  {}: {}",
+        "New Version".bold(),
+        crate::conversions::as_i64(&config["version"], "version")?
+    );
     println!();
 
     Ok(())
@@ -1340,12 +1442,22 @@ pub async fn config_set(
 
 pub async fn config_history(api_url: &str, contract_id: &str, environment: &str) -> Result<()> {
     let client = reqwest::Client::new();
-    let url = format!("{}/api/contracts/{}/config/history?environment={}", api_url, contract_id, environment);
+    let url = format!(
+        "{}/api/contracts/{}/config/history?environment={}",
+        api_url, contract_id, environment
+    );
 
-    let response = client.get(&url).send().await.context("Failed to fetch configuration history")?;
+    let response = client
+        .get(&url)
+        .send()
+        .await
+        .context("Failed to fetch configuration history")?;
 
     if !response.status().is_success() {
-        anyhow::bail!("Failed to get config history: {}", response.text().await.unwrap_or_default());
+        anyhow::bail!(
+            "Failed to get config history: {}",
+            response.text().await.unwrap_or_default()
+        );
     }
 
     let configs: Vec<serde_json::Value> = response.json().await?;
@@ -1380,26 +1492,49 @@ pub async fn config_rollback(
     created_by: &str,
 ) -> Result<()> {
     let client = reqwest::Client::new();
-    let url = format!("{}/api/contracts/{}/config/rollback?environment={}", api_url, contract_id, environment);
+    let url = format!(
+        "{}/api/contracts/{}/config/rollback?environment={}",
+        api_url, contract_id, environment
+    );
 
     let payload = json!({
         "roll_back_to_version": version,
         "created_by": created_by,
     });
 
-    println!("\n{}", format!("Rolling back configuration to v{}...", version).bold().cyan());
+    println!(
+        "\n{}",
+        format!("Rolling back configuration to v{}...", version)
+            .bold()
+            .cyan()
+    );
 
-    let response = client.post(&url).json(&payload).send().await.context("Failed to rollback configuration")?;
+    let response = client
+        .post(&url)
+        .json(&payload)
+        .send()
+        .await
+        .context("Failed to rollback configuration")?;
 
     if !response.status().is_success() {
-        anyhow::bail!("Failed to rollback config: {}", response.text().await.unwrap_or_default());
+        anyhow::bail!(
+            "Failed to rollback config: {}",
+            response.text().await.unwrap_or_default()
+        );
     }
 
     let config: serde_json::Value = response.json().await?;
 
-    println!("{}", "✓ Configuration rolled back successfully!".green().bold());
+    println!(
+        "{}",
+        "✓ Configuration rolled back successfully!".green().bold()
+    );
     println!("  {}: {}", "Environment".bold(), environment);
-    println!("  {}: {}", "New Active Version".bold(), crate::conversions::as_i64(&config["version"], "version")?);
+    println!(
+        "  {}: {}",
+        "New Active Version".bold(),
+        crate::conversions::as_i64(&config["version"], "version")?
+    );
     println!();
 
     Ok(())
@@ -1417,9 +1552,16 @@ pub fn incident_update(incident_id_str: &str, state_str: &str) -> Result<()> {
     println!("\n{}", "Incident Updated".bold().cyan());
     println!("{}", "=".repeat(80).cyan());
     println!("  {}: {}", "Incident ID".bold(), id);
-    println!("  {}: {}", "New State".bold(), new_state.to_string().green().bold());
+    println!(
+        "  {}: {}",
+        "New State".bold(),
+        new_state.to_string().green().bold()
+    );
 
-    if matches!(new_state, IncidentState::Recovered | IncidentState::PostReview) {
+    if matches!(
+        new_state,
+        IncidentState::Recovered | IncidentState::PostReview
+    ) {
         println!(
             "\n  {} {}",
             "✓".green(),
@@ -1490,15 +1632,28 @@ pub async fn scan_deps(
         let version = crate::conversions::as_str(&finding["current_version"], "current_version")?;
         let severity = crate::conversions::as_str(&finding["severity"], "severity")?;
         let cve_id = crate::conversions::as_str(&finding["cve_id"], "cve_id")?;
-        let recommended = crate::conversions::as_str(&finding["recommended_version"], "recommended_version")?;
+        let recommended =
+            crate::conversions::as_str(&finding["recommended_version"], "recommended_version")?;
 
-        let sev_enum = severity.parse::<Severity>().context("Invalid severity string")?;
+        let sev_enum = severity
+            .parse::<Severity>()
+            .context("Invalid severity string")?;
         if matches!(sev_enum, Severity::Critical | Severity::High) {
             has_high_severity = true;
         }
 
-        println!("  {} {}@{} - {}", severity_colored(&sev_enum), package, version, cve_id.bold());
-        println!("    {} Recommended patch: {}", "↳".bright_black(), recommended.green());
+        println!(
+            "  {} {}@{} - {}",
+            severity_colored(&sev_enum),
+            package,
+            version,
+            cve_id.bold()
+        );
+        println!(
+            "    {} Recommended patch: {}",
+            "↳".bright_black(),
+            recommended.green()
+        );
     }
 
     println!("\n{}", "=".repeat(80).red());
@@ -1513,176 +1668,184 @@ pub async fn scan_deps(
 
 #[cfg(test)]
 mod flamegraph_and_network_tests {
-mod tests_network {
-    use super::*;
-    use std::collections::HashMap;
-    use std::fs;
-    use std::time::Duration;
+    mod tests_network {
+        use super::super::{generate_flame_graph_file, profile, Network};
+        use crate::profiler;
+        use std::collections::HashMap;
+        use std::fs;
+        use std::time::Duration;
 
-    fn sample_profile() -> profiler::ProfileData {
-        let mut functions = HashMap::new();
-        functions.insert(
-            "main".to_string(),
-            profiler::FunctionProfile {
-                name: "main".to_string(),
-                total_time: Duration::from_millis(10),
-                call_count: 1,
-                avg_time: Duration::from_millis(10),
-                min_time: Duration::from_millis(10),
-                max_time: Duration::from_millis(10),
-                children: vec![],
-            },
-        );
+        fn sample_profile() -> profiler::ProfileData {
+            let mut functions = HashMap::new();
+            functions.insert(
+                "main".to_string(),
+                profiler::FunctionProfile {
+                    name: "main".to_string(),
+                    total_time: Duration::from_millis(10),
+                    call_count: 1,
+                    avg_time: Duration::from_millis(10),
+                    min_time: Duration::from_millis(10),
+                    max_time: Duration::from_millis(10),
+                    children: vec![],
+                },
+            );
 
-        profiler::ProfileData {
-            contract_path: "contract.rs".to_string(),
-            method: Some("main".to_string()),
-            timestamp: "2026-01-01T00:00:00Z".to_string(),
-            total_duration: Duration::from_millis(10),
-            functions,
-            call_stack: vec![],
-            overhead_percent: 0.0,
+            profiler::ProfileData {
+                contract_path: "contract.rs".to_string(),
+                method: Some("main".to_string()),
+                timestamp: "2026-01-01T00:00:00Z".to_string(),
+                total_duration: Duration::from_millis(10),
+                functions,
+                call_stack: vec![],
+                overhead_percent: 0.0,
+            }
+        }
+
+        fn write_sample_contract(temp_dir: &tempfile::TempDir) -> String {
+            let contract_path = temp_dir.path().join("sample_contract.rs");
+            fs::write(
+                &contract_path,
+                "pub fn main() {}\nfn helper_one() {}\nfn helper_two() {}\n",
+            )
+            .expect("failed to write sample contract");
+            contract_path.to_string_lossy().into_owned()
+        }
+
+        #[test]
+        fn test_network_parsing() {
+            assert_eq!("mainnet".parse::<Network>().unwrap(), Network::Mainnet);
+            assert_eq!("testnet".parse::<Network>().unwrap(), Network::Testnet);
+            assert_eq!("futurenet".parse::<Network>().unwrap(), Network::Futurenet);
+            assert_eq!("Mainnet".parse::<Network>().unwrap(), Network::Mainnet); // Case insensitive
+            assert!("invalid".parse::<Network>().is_err());
+        }
+
+        #[test]
+        fn generate_flame_graph_file_writes_svg_for_valid_path() {
+            let profile = sample_profile();
+            let temp_dir = tempfile::tempdir().expect("failed to create temp directory");
+            let output_path = temp_dir.path().join("flamegraph-output.svg");
+            let output_path_str = output_path.to_string_lossy().into_owned();
+
+            generate_flame_graph_file(&profile, &output_path_str)
+                .expect("expected flame graph generation to succeed");
+            assert!(output_path.exists(), "expected output file to exist");
+        }
+
+        #[test]
+        fn generate_flame_graph_file_returns_error_for_invalid_path() {
+            let profile = sample_profile();
+            let temp_dir = tempfile::tempdir().expect("failed to create temp directory");
+            let invalid_output = temp_dir
+                .path()
+                .join("missing-dir")
+                .join("flamegraph-output.svg");
+            let invalid_output_str = invalid_output.to_string_lossy().into_owned();
+
+            let err = generate_flame_graph_file(&profile, &invalid_output_str)
+                .expect_err("expected flame graph generation to fail for invalid path");
+            assert!(
+                err.to_string().contains("Failed to write flame graph"),
+                "unexpected error: {err}"
+            );
+        }
+
+        #[test]
+        fn profile_writes_json_and_flamegraph_outputs() {
+            let temp_dir = tempfile::tempdir().expect("failed to create temp directory");
+            let contract_path = write_sample_contract(&temp_dir);
+            let json_output = temp_dir.path().join("profile-output.json");
+            let flame_output = temp_dir.path().join("profile-output.svg");
+            let json_output_str = json_output.to_string_lossy().into_owned();
+            let flame_output_str = flame_output.to_string_lossy().into_owned();
+
+            profile(
+                &contract_path,
+                None,
+                Some(&json_output_str),
+                Some(&flame_output_str),
+                None,
+                true,
+            )
+            .expect("expected profiling to succeed");
+
+            assert!(
+                json_output.exists(),
+                "expected JSON profile output to exist"
+            );
+            assert!(
+                flame_output.exists(),
+                "expected flame graph output to exist"
+            );
+        }
+
+        #[test]
+        fn profile_supports_baseline_comparison() {
+            let temp_dir = tempfile::tempdir().expect("failed to create temp directory");
+            let contract_path = write_sample_contract(&temp_dir);
+            let baseline_path = temp_dir.path().join("baseline.json");
+            let baseline_path_str = baseline_path.to_string_lossy().into_owned();
+
+            let baseline_json = serde_json::to_string_pretty(&sample_profile())
+                .expect("failed to serialize baseline");
+            fs::write(&baseline_path, baseline_json).expect("failed to write baseline file");
+
+            profile(
+                &contract_path,
+                None,
+                None,
+                None,
+                Some(&baseline_path_str),
+                false,
+            )
+            .expect("expected profiling with baseline comparison to succeed");
+        }
+
+        #[test]
+        fn profile_returns_error_for_missing_baseline() {
+            let temp_dir = tempfile::tempdir().expect("failed to create temp directory");
+            let contract_path = write_sample_contract(&temp_dir);
+            let missing_baseline = temp_dir.path().join("missing-baseline.json");
+            let missing_baseline_str = missing_baseline.to_string_lossy().into_owned();
+
+            let err = profile(
+                &contract_path,
+                None,
+                None,
+                None,
+                Some(&missing_baseline_str),
+                false,
+            )
+            .expect_err("expected missing baseline to fail");
+
+            assert!(
+                err.to_string()
+                    .contains("Failed to load baseline profile from"),
+                "unexpected error: {err}"
+            );
+        }
+
+        #[test]
+        fn profile_returns_error_for_unknown_method() {
+            let temp_dir = tempfile::tempdir().expect("failed to create temp directory");
+            let contract_path = write_sample_contract(&temp_dir);
+
+            let err = profile(
+                &contract_path,
+                Some("does_not_exist"),
+                None,
+                None,
+                None,
+                false,
+            )
+            .expect_err("expected unknown method to fail");
+
+            assert!(
+                err.to_string().contains("was not found in contract"),
+                "unexpected error: {err}"
+            );
         }
     }
-
-    fn write_sample_contract(temp_dir: &tempfile::TempDir) -> String {
-        let contract_path = temp_dir.path().join("sample_contract.rs");
-        fs::write(
-            &contract_path,
-            "pub fn main() {}\nfn helper_one() {}\nfn helper_two() {}\n",
-        )
-        .expect("failed to write sample contract");
-        contract_path.to_string_lossy().into_owned()
-    }
-
-    #[test]
-    fn test_network_parsing() {
-        assert_eq!("mainnet".parse::<Network>().unwrap(), Network::Mainnet);
-        assert_eq!("testnet".parse::<Network>().unwrap(), Network::Testnet);
-        assert_eq!("futurenet".parse::<Network>().unwrap(), Network::Futurenet);
-        assert_eq!("Mainnet".parse::<Network>().unwrap(), Network::Mainnet); // Case insensitive
-        assert!("invalid".parse::<Network>().is_err());
-    }
-
-    #[test]
-    fn generate_flame_graph_file_writes_svg_for_valid_path() {
-        let profile = sample_profile();
-        let temp_dir = tempfile::tempdir().expect("failed to create temp directory");
-        let output_path = temp_dir.path().join("flamegraph-output.svg");
-        let output_path_str = output_path.to_string_lossy().into_owned();
-
-        generate_flame_graph_file(&profile, &output_path_str)
-            .expect("expected flame graph generation to succeed");
-        assert!(output_path.exists(), "expected output file to exist");
-    }
-
-    #[test]
-    fn generate_flame_graph_file_returns_error_for_invalid_path() {
-        let profile = sample_profile();
-        let temp_dir = tempfile::tempdir().expect("failed to create temp directory");
-        let invalid_output = temp_dir.path().join("missing-dir").join("flamegraph-output.svg");
-        let invalid_output_str = invalid_output.to_string_lossy().into_owned();
-
-        let err = generate_flame_graph_file(&profile, &invalid_output_str)
-            .expect_err("expected flame graph generation to fail for invalid path");
-        assert!(
-            err.to_string().contains("Failed to write flame graph"),
-            "unexpected error: {err}"
-        );
-    }
-
-    #[test]
-    fn profile_writes_json_and_flamegraph_outputs() {
-        let temp_dir = tempfile::tempdir().expect("failed to create temp directory");
-        let contract_path = write_sample_contract(&temp_dir);
-        let json_output = temp_dir.path().join("profile-output.json");
-        let flame_output = temp_dir.path().join("profile-output.svg");
-        let json_output_str = json_output.to_string_lossy().into_owned();
-        let flame_output_str = flame_output.to_string_lossy().into_owned();
-
-        profile(
-            &contract_path,
-            None,
-            Some(&json_output_str),
-            Some(&flame_output_str),
-            None,
-            true,
-        )
-        .expect("expected profiling to succeed");
-
-        assert!(json_output.exists(), "expected JSON profile output to exist");
-        assert!(
-            flame_output.exists(),
-            "expected flame graph output to exist"
-        );
-    }
-
-    #[test]
-    fn profile_supports_baseline_comparison() {
-        let temp_dir = tempfile::tempdir().expect("failed to create temp directory");
-        let contract_path = write_sample_contract(&temp_dir);
-        let baseline_path = temp_dir.path().join("baseline.json");
-        let baseline_path_str = baseline_path.to_string_lossy().into_owned();
-
-        let baseline_json =
-            serde_json::to_string_pretty(&sample_profile()).expect("failed to serialize baseline");
-        fs::write(&baseline_path, baseline_json).expect("failed to write baseline file");
-
-        profile(
-            &contract_path,
-            None,
-            None,
-            None,
-            Some(&baseline_path_str),
-            false,
-        )
-        .expect("expected profiling with baseline comparison to succeed");
-    }
-
-    #[test]
-    fn profile_returns_error_for_missing_baseline() {
-        let temp_dir = tempfile::tempdir().expect("failed to create temp directory");
-        let contract_path = write_sample_contract(&temp_dir);
-        let missing_baseline = temp_dir.path().join("missing-baseline.json");
-        let missing_baseline_str = missing_baseline.to_string_lossy().into_owned();
-
-        let err = profile(
-            &contract_path,
-            None,
-            None,
-            None,
-            Some(&missing_baseline_str),
-            false,
-        )
-        .expect_err("expected missing baseline to fail");
-
-        assert!(
-            err.to_string().contains("Failed to load baseline profile from"),
-            "unexpected error: {err}"
-        );
-    }
-
-    #[test]
-    fn profile_returns_error_for_unknown_method() {
-        let temp_dir = tempfile::tempdir().expect("failed to create temp directory");
-        let contract_path = write_sample_contract(&temp_dir);
-
-        let err = profile(
-            &contract_path,
-            Some("does_not_exist"),
-            None,
-            None,
-            None,
-            false,
-        )
-        .expect_err("expected unknown method to fail");
-
-        assert!(
-            err.to_string().contains("was not found in contract"),
-            "unexpected error: {err}"
-        );
-    }
-}
 }
 /// Validate a contract function call for type safety
 pub async fn validate_call(
@@ -1725,17 +1888,26 @@ pub async fn validate_call(
     println!("{}", "=".repeat(60).cyan());
     println!("\n{}: {}", "Function".bold(), method_name);
     println!("{}: {}", "Contract".bold(), contract_id);
-    println!("{}: {}", "Strict Mode".bold(), if strict { "Yes" } else { "No" });
+    println!(
+        "{}: {}",
+        "Strict Mode".bold(),
+        if strict { "Yes" } else { "No" }
+    );
 
     if valid {
-        println!("\n{} {}", "✓".green().bold(), "Call is valid!".green().bold());
+        println!(
+            "\n{} {}",
+            "✓".green().bold(),
+            "Call is valid!".green().bold()
+        );
 
         // Show parsed parameters
         if let Some(params) = data["parsed_params"].as_array() {
             println!("\n{}", "Parsed Parameters:".bold());
             for param in params {
                 let name = crate::conversions::as_str(&param["name"], "name")?;
-                let type_name = crate::conversions::as_str(&param["expected_type"], "expected_type")?;
+                let type_name =
+                    crate::conversions::as_str(&param["expected_type"], "expected_type")?;
                 println!("  {} {}: {}", "•".green(), name.bold(), type_name);
             }
         }
@@ -1767,7 +1939,13 @@ pub async fn validate_call(
                 let field = error["field"].as_str();
 
                 if let Some(f) = field {
-                    println!("  {} [{}] {}: {}", "✗".red(), code.bright_black(), f.bold(), msg);
+                    println!(
+                        "  {} [{}] {}: {}",
+                        "✗".red(),
+                        code.bright_black(),
+                        f.bold(),
+                        msg
+                    );
                 } else {
                     println!("  {} [{}] {}", "✗".red(), code.bright_black(), msg);
                 }
@@ -1930,7 +2108,7 @@ pub async fn list_functions(api_url: &str, contract_id: &str) -> Result<()> {
 /// Use --network to get network-specific config (e.g. mainnet, testnet).
 pub async fn info(api_url: &str, id: &str, network: crate::config::Network) -> Result<()> {
     println!("\n{}", "Fetching contract information...".bold().cyan());
-    
+
     let url = format!("{}/api/contracts/{}", api_url.trim_end_matches('/'), id);
     let client = reqwest::Client::new();
     let response = client
@@ -1951,7 +2129,7 @@ pub async fn info(api_url: &str, id: &str, network: crate::config::Network) -> R
 
 pub fn doc(contract_path: &str, output: &str) -> Result<()> {
     println!("\n{}", "Generating contract documentation...".bold().cyan());
-    
+
     let content = format!(
         r#"# Contract Documentation
 
@@ -2009,15 +2187,27 @@ fn abi_to_markdown(abi: &contract_abi::ContractABI) -> String {
             md.push_str("- None\n");
         } else {
             for p in &func.params {
-                md.push_str(&format!("- `{}`: `{}`\n", p.name, p.param_type.display_name()));
+                md.push_str(&format!(
+                    "- `{}`: `{}`\n",
+                    p.name,
+                    p.param_type.display_name()
+                ));
             }
         }
-        md.push_str(&format!("\n**Returns:** `{}`\n\n", func.return_type.display_name()));
+        md.push_str(&format!(
+            "\n**Returns:** `{}`\n\n",
+            func.return_type.display_name()
+        ));
     }
     if !abi.errors.is_empty() {
         md.push_str("## Errors\n\n");
         for e in &abi.errors {
-            md.push_str(&format!("- **{}** (code {}): {}\n", e.name, e.code, e.doc.as_deref().unwrap_or("")));
+            md.push_str(&format!(
+                "- **{}** (code {}): {}\n",
+                e.name,
+                e.code,
+                e.doc.as_deref().unwrap_or("")
+            ));
         }
     }
     md
@@ -2052,8 +2242,7 @@ fn openapi_to_html(spec_json: &str, title: &str) -> String {
 </body>
 </html>
 "#,
-        title,
-        spec_escaped
+        title, spec_escaped
     )
 }
 
@@ -2090,7 +2279,10 @@ pub fn openapi(contract_path: &str, output: &str, format: &str) -> Result<()> {
             println!("{} Wrote {}", "✓".green(), yaml_path);
             return Ok(());
         }
-        _ => anyhow::bail!("Unsupported format '{}'. Use: yaml, json, markdown, html, pdf", format),
+        _ => anyhow::bail!(
+            "Unsupported format '{}'. Use: yaml, json, markdown, html, pdf",
+            format
+        ),
     };
     fs::write(output, content)?;
     println!("{} Documentation saved to: {}", "✓".green(), output);
@@ -2117,4 +2309,3 @@ pub fn sla_status(id: &str) -> Result<()> {
 
     Ok(())
 }
-

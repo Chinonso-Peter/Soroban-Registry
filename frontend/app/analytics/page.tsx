@@ -10,8 +10,8 @@ import RecentAdditionsTimeline from '@/components/analytics/RecentAdditionsTimel
 import { AlertCircle, RefreshCw } from 'lucide-react';
 
 export default function AnalyticsDashboard() {
-  const [data, setData] = useState<any>(null);
-  const [trending, setTrending] = useState<any[]>([]);
+  const [data, setData] = useState<Record<string, unknown> | null>(null);
+  const [trending, setTrending] = useState<Record<string, unknown>[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState(false);
 

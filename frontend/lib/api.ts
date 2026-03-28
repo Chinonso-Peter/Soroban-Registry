@@ -1553,7 +1553,7 @@ export type FieldOperator = 'eq' | 'ne' | 'gt' | 'lt' | 'in' | 'contains' | 'sta
 export interface QueryCondition {
   field: string;
   operator: FieldOperator;
-  value: any;
+  value: string | number | boolean | string[];
 }
 
 export type QueryNode = 

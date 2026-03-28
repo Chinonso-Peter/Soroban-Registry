@@ -71,10 +71,10 @@ export default function QueryBuilder({ initialQuery, onChange, onSearch, onSave 
 
   const handleAddCondition = (path: number[] = []) => {
     const newQuery = { ...query };
-    let target: any = newQuery;
-    
+    let target: QueryNode = newQuery;
+
     for (const index of path) {
-      target = target.conditions[index];
+      target = (target as { operator: QueryOperator; conditions: QueryNode[] }).conditions[index];
     }
 
     if ('conditions' in target) {
@@ -85,10 +85,10 @@ export default function QueryBuilder({ initialQuery, onChange, onSearch, onSave 
 
   const handleAddGroup = (path: number[] = []) => {
     const newQuery = { ...query };
-    let target: any = newQuery;
-    
+    let target: QueryNode = newQuery;
+
     for (const index of path) {
-      target = target.conditions[index];
+      target = (target as { operator: QueryOperator; conditions: QueryNode[] }).conditions[index];
     }
 
     if ('conditions' in target) {
@@ -104,14 +104,14 @@ export default function QueryBuilder({ initialQuery, onChange, onSearch, onSave 
 
   const handleRemove = (path: number[]) => {
     if (path.length === 0) return;
-    
+
     const newQuery = { ...query };
     const lastIndex = path[path.length - 1];
     const parentPath = path.slice(0, -1);
-    
-    let target: any = newQuery;
+
+    let target: QueryNode = newQuery;
     for (const index of parentPath) {
-      target = target.conditions[index];
+      target = (target as { operator: QueryOperator; conditions: QueryNode[] }).conditions[index];
     }
 
     if ('conditions' in target) {
@@ -127,10 +127,10 @@ export default function QueryBuilder({ initialQuery, onChange, onSearch, onSave 
 
   const handleUpdateCondition = (path: number[], updates: Partial<QueryCondition>) => {
     const newQuery = { ...query };
-    let target: any = newQuery;
-    
+    let target: QueryNode = newQuery;
+
     for (const index of path) {
-      target = target.conditions[index];
+      target = (target as { operator: QueryOperator; conditions: QueryNode[] }).conditions[index];
     }
 
     Object.assign(target, updates);
@@ -139,15 +139,15 @@ export default function QueryBuilder({ initialQuery, onChange, onSearch, onSave 
 
   const handleUpdateGroupOperator = (path: number[], operator: QueryOperator) => {
     const newQuery = { ...query };
-    let target: any = newQuery;
-    
+    let target: QueryNode = newQuery;
+
     if (path.length === 0) {
-      target.operator = operator;
+      (target as { operator: QueryOperator; conditions: QueryNode[] }).operator = operator;
     } else {
       for (const index of path) {
-        target = target.conditions[index];
+        target = (target as { operator: QueryOperator; conditions: QueryNode[] }).conditions[index];
       }
-      target.operator = operator;
+      (target as { operator: QueryOperator; conditions: QueryNode[] }).operator = operator;
     }
     updateQuery(newQuery);
   };
