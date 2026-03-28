@@ -9,41 +9,63 @@ interface AnalyticsExportProps {
   period: TimePeriod;
 }
 
+function csvEscape(value: string | number | null | undefined): string {
+  if (value === null || value === undefined) {
+    return '';
+  }
+  const str = String(value);
+  if (/[",\r\n]/.test(str)) {
+    const escaped = str.replace(/"/g, '""');
+    return `"${escaped}"`;
+  }
+  return str;
+}
+
 function toCSV(data: AnalyticsResponse): string {
   const sections: string[] = [];
 
   sections.push('=== Search Trends ===');
   sections.push('Date,Searches,Unique Terms');
   data.searchTrends.forEach((row) => {
-    sections.push(`${row.date},${row.searches},${row.uniqueTerms}`);
+    sections.push(
+      `${csvEscape(row.date)},${csvEscape(row.searches)},${csvEscape(row.uniqueTerms)}`
+    );
   });
 
   sections.push('');
   sections.push('=== Top Search Terms ===');
   sections.push('Term,Count,Growth(%)');
   data.topSearchTerms.forEach((row) => {
-    sections.push(`${row.term},${row.count},${row.growth}`);
+    sections.push(
+      `${csvEscape(row.term)},${csvEscape(row.count)},${csvEscape(row.growth)}`
+    );
   });
 
   sections.push('');
   sections.push('=== Engagement Funnel ===');
   sections.push('Stage,Users,Percentage(%)');
   data.engagementFunnel.forEach((row) => {
-    sections.push(`${row.stage},${row.users},${row.percentage}`);
+    sections.push(
+      `${csvEscape(row.stage)},${csvEscape(row.users)},${csvEscape(row.percentage)}`
+    );
   });
 
   sections.push('');
   sections.push('=== Category Popularity ===');
   sections.push('Category,Searches,Views,Deployments');
   data.categoryPopularity.forEach((row) => {
-    sections.push(`${row.category},${row.searches},${row.views},${row.deployments}`);
+    sections.push(
+      `${csvEscape(row.category)},${csvEscape(row.searches)},${csvEscape(row.views)},${csvEscape(row.deployments)}`
+    );
   });
 
   sections.push('');
   sections.push('=== Network Distribution ===');
   sections.push('Network,Region,Count,Percentage(%)');
   data.networkDistribution.forEach((row) => {
-    sections.push(`${row.network},${row.region},${row.count},${row.percentage}`);
+    sections.push(
+      `${csvEscape(row.network)},${csvEscape(row.region)},${csvEscape(row.count)},${csvEscape(row.percentage)}`
+    );
   });
 
   return sections.join('\n');
