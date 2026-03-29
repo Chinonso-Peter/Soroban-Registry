@@ -150,7 +150,7 @@ pub fn contract_routes() -> Router<AppState> {
         )
         .route(
             "/api/analytics/dashboard",
-            get(handlers::get_dashboard_analytics),
+            get(analytics_handlers::get_analytics_summary),
         )
         .route(
             "/api/contracts/:id/dependencies",
@@ -171,6 +171,14 @@ pub fn contract_routes() -> Router<AppState> {
         .route(
             "/api/contracts/:id/similar",
             get(similarity_handlers::get_similar_contracts),
+        )
+        .route(
+            "/api/contracts/:id/recommendations",
+            get(recommendation_handlers::get_contract_recommendations),
+        )
+        .route(
+            "/contracts/:id/recommendations",
+            get(recommendation_handlers::get_contract_recommendations),
         )
         .route(
             "/contracts/:id/similar",
@@ -405,6 +413,10 @@ pub fn compatibility_dashboard_routes() -> Router<AppState> {
         "/api/compatibility-dashboard",
         get(compatibility_testing_handlers::get_compatibility_dashboard),
     )
+}
+
+pub fn category_routes() -> Router<AppState> {
+    Router::new().route("/api/categories", get(category_handlers::list_categories))
 }
 
 pub fn canary_routes() -> Router<AppState> {

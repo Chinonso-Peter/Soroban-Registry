@@ -649,6 +649,76 @@ pub struct ContractSearchParams {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, utoipa::ToSchema)]
+pub enum FieldOperator {
+    Eq,
+    Ne,
+    Gt,
+    Lt,
+    In,
+    Contains,
+    StartsWith,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, utoipa::ToSchema)]
+pub struct QueryCondition {
+    pub field: String,
+    pub operator: FieldOperator,
+    pub value: serde_json::Value,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, utoipa::ToSchema)]
+pub enum QueryOperator {
+    And,
+    Or,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, utoipa::ToSchema)]
+pub enum QueryNode {
+    Condition(QueryCondition),
+    Group {
+        operator: QueryOperator,
+        conditions: Vec<QueryNode>,
+    },
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, utoipa::ToSchema)]
+pub struct AdvancedSearchRequest {
+    pub query: QueryNode,
+    pub limit: Option<i64>,
+    pub offset: Option<i64>,
+    pub sort_by: Option<SortBy>,
+    pub sort_order: Option<SortOrder>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, FromRow, utoipa::ToSchema)]
+pub struct FavoriteSearch {
+    pub id: Uuid,
+    pub user_address: String,
+    pub name: String,
+    pub query_json: serde_json::Value,
+    pub created_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, utoipa::ToSchema)]
+pub struct SaveFavoriteSearchRequest {
+    pub user_address: String,
+    pub name: String,
+    pub query_json: serde_json::Value,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, FromRow, utoipa::ToSchema)]
+pub struct ContractSource {
+    pub id: Uuid,
+    pub contract_version_id: Uuid,
+    pub source_format: String,
+    pub storage_backend: String,
+    pub storage_key: String,
+    pub source_hash: String,
+    pub source_size: i64,
+    pub created_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, utoipa::ToSchema)]
 pub struct SearchSuggestion {
     pub text: String,
     pub kind: String,
@@ -1287,6 +1357,86 @@ pub struct RecordPerformanceMetricRequest {
     pub p95: Option<f64>,
     pub p99: Option<f64>,
     pub metadata: Option<serde_json::Value>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, utoipa::ToSchema)]
+pub struct RecordPerformanceBenchmarkRequest {
+    pub contract_id: String,
+    pub contract_version_id: Option<String>,
+    pub benchmark_name: String,
+    pub execution_time_ms: f64,
+    pub gas_used: i64,
+    pub sample_size: Option<i32>,
+    pub source: Option<String>,
+    pub metadata: Option<serde_json::Value>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, utoipa::ToSchema)]
+pub struct PerformanceBenchmark {
+    pub id: Uuid,
+    pub contract_id: Uuid,
+    pub contract_version_id: Option<Uuid>,
+    pub version: Option<String>,
+    pub benchmark_name: String,
+    pub execution_time_ms: Decimal,
+    pub gas_used: i64,
+    pub sample_size: i32,
+    pub source: String,
+    pub recorded_at: DateTime<Utc>,
+    pub metadata: Option<serde_json::Value>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, utoipa::ToSchema)]
+pub struct PerformanceMetricSnapshot {
+    pub metric_type: String,
+    pub benchmark_name: Option<String>,
+    pub latest_value: Decimal,
+    pub previous_value: Option<Decimal>,
+    pub change_percent: Option<Decimal>,
+    pub recorded_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, utoipa::ToSchema)]
+pub struct PerformanceTrendPoint {
+    pub bucket_start: DateTime<Utc>,
+    pub bucket_end: DateTime<Utc>,
+    pub benchmark_name: String,
+    pub avg_execution_time_ms: Decimal,
+    pub avg_gas_used: Decimal,
+    pub sample_count: i64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, utoipa::ToSchema)]
+pub struct PerformanceRegression {
+    pub benchmark_name: String,
+    pub current_version: Option<String>,
+    pub previous_version: Option<String>,
+    pub execution_time_regression_percent: Option<Decimal>,
+    pub gas_regression_percent: Option<Decimal>,
+    pub severity: String,
+    pub detected_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, utoipa::ToSchema)]
+pub struct PerformanceComparisonEntry {
+    pub contract_id: Uuid,
+    pub contract_name: String,
+    pub category: Option<String>,
+    pub benchmark_name: String,
+    pub avg_execution_time_ms: Decimal,
+    pub avg_gas_used: Decimal,
+    pub sample_count: i64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, utoipa::ToSchema)]
+pub struct ContractPerformanceSummaryResponse {
+    pub contract_id: Uuid,
+    pub latest_benchmarks: Vec<PerformanceBenchmark>,
+    pub metric_snapshots: Vec<PerformanceMetricSnapshot>,
+    pub trend_points: Vec<PerformanceTrendPoint>,
+    pub regressions: Vec<PerformanceRegression>,
+    pub recent_anomalies: Vec<PerformanceAnomaly>,
+    pub recent_alerts: Vec<PerformanceAlert>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, utoipa::ToSchema)]
@@ -2235,6 +2385,45 @@ impl ContractHealth {
     pub fn health_status(&self) -> Result<HealthStatus, String> {
         self.status.parse()
     }
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// CONTRACT RECOMMENDATIONS (Issue #492)
+// ═══════════════════════════════════════════════════════════════════════════
+
+#[derive(Debug, Clone, Serialize, Deserialize, utoipa::ToSchema)]
+pub struct RecommendationReason {
+    /// Stable machine-readable reason code (e.g. same_category, similar_functionality)
+    pub code: String,
+    /// Human-readable reason explanation
+    pub message: String,
+    /// Relative contribution weight for this reason in the final score
+    pub weight: f64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, utoipa::ToSchema)]
+pub struct RecommendedContract {
+    pub id: Uuid,
+    pub contract_id: String,
+    pub name: String,
+    pub description: Option<String>,
+    pub network: Network,
+    pub category: Option<String>,
+    pub popularity_score: i64,
+    pub similarity_score: f64,
+    pub recommendation_score: f64,
+    pub reasons: Vec<RecommendationReason>,
+    pub explanation: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, utoipa::ToSchema)]
+pub struct ContractRecommendationsResponse {
+    pub contract_id: Uuid,
+    pub algorithm: String,
+    pub ab_variant: String,
+    pub cached: bool,
+    pub generated_at: DateTime<Utc>,
+    pub recommendations: Vec<RecommendedContract>,
 }
 
 // ═══════════════════════════════════════════════════════════════════════════

@@ -123,6 +123,7 @@ impl CacheLayer {
             verification_cache,
             generic_cache,
             contract_access_cache,
+            redis_cm,
             config,
             redis_cm,
         }

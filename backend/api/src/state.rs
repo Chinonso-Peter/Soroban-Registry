@@ -40,12 +40,14 @@ pub struct AppState {
     pub db: PgPool,
     pub started_at: Instant,
     pub cache: Arc<CacheLayer>,
+    pub contract_events: Arc<ContractEventHub>,
     pub registry: Registry,
     pub job_engine: Arc<soroban_batch::engine::JobEngine>,
     pub is_shutting_down: Arc<AtomicBool>,
     pub health_monitor_status: HealthMonitorStatus,
     pub auth_mgr: Arc<RwLock<AuthManager>>,
     pub resource_mgr: Arc<RwLock<ResourceManager>>,
+    pub source_storage: Arc<SourceStorage>,
     pub event_broadcaster: broadcast::Sender<RealtimeEvent>,
     pub contract_events: Arc<ContractEventHub>,
 }
@@ -62,17 +64,21 @@ impl AppState {
             AuthManager::from_env().expect("JWT config validated at startup"),
         ));
         let resource_mgr = Arc::new(RwLock::new(ResourceManager::new()));
+        let contract_events = Arc::new(ContractEventHub::from_env());
+        let source_storage = Arc::new(SourceStorage::new().await?);
         let (event_broadcaster, _) = broadcast::channel(100);
         Ok(Self {
             db,
             started_at: Instant::now(),
             cache: Arc::new(CacheLayer::new(config).await),
+            contract_events,
             registry,
             job_engine,
             is_shutting_down,
             health_monitor_status: HealthMonitorStatus::default(),
             auth_mgr,
             resource_mgr,
+            source_storage,
             event_broadcaster,
         })
     }
