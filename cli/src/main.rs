@@ -2,6 +2,7 @@
 
 mod backup;
 mod batch_verify;
+mod cicd;
 mod commands;
 mod config;
 mod contract_verify;
@@ -29,7 +30,6 @@ mod table_format;
 mod test_framework;
 mod webhook;
 mod wizard;
-mod cicd;
 
 use anyhow::Result;
 use clap::{Parser, Subcommand};
@@ -555,7 +555,6 @@ pub enum ReleaseNotesCommands {
         #[arg(long)]
         json: bool,
     },
-
 
     /// Edit draft release notes before publishing
     Edit {
@@ -1728,10 +1727,16 @@ async fn main() -> Result<()> {
         },
         // ── Contract verify command (#522) ───────────────────────────────────
         Commands::Contract { action } => match action {
-            ContractCommands::Verify { address, network, json } => {
+            ContractCommands::Verify {
+                address,
+                network,
+                json,
+            } => {
                 log::debug!(
                     "Command: contract verify | address={} network={} json={}",
-                    address, network, json
+                    address,
+                    network,
+                    json
                 );
                 contract_verify::run(&cli.api_url, &address, &network, json).await?;
             }
@@ -1830,8 +1835,20 @@ async fn main() -> Result<()> {
                 auto_register,
                 json,
             } => {
-                log::debug!("Command: cicd run | path={} network={}", contract_path, network);
-                cicd::run_pipeline(&cli.api_url, &contract_path, &network, skip_scan, auto_register, json).await?;
+                log::debug!(
+                    "Command: cicd run | path={} network={}",
+                    contract_path,
+                    network
+                );
+                cicd::run_pipeline(
+                    &cli.api_url,
+                    &contract_path,
+                    &network,
+                    skip_scan,
+                    auto_register,
+                    json,
+                )
+                .await?;
             }
             CicdCommands::Validate { contract_path } => {
                 log::debug!("Command: cicd validate | path={}", contract_path);
