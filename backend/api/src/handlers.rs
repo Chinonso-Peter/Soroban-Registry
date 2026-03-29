@@ -2555,6 +2555,9 @@ pub async fn create_contract_version(
             .await
             .map_err(|err| db_internal_error("fetch contract versions", err))?;
 
+    // prev_snapshot is populated when there is a prior version; used for delta storage.
+    let mut prev_snapshot: Option<crate::patch_handlers::VersionSnapshot> = None;
+
     if !existing_versions.is_empty() {
         let mut parsed: Vec<SemVer> = Vec::with_capacity(existing_versions.len());
         for version in &existing_versions {
@@ -2595,6 +2598,41 @@ pub async fn create_contract_version(
                         old_version, new_version
                     ),
                 ));
+            }
+
+            // Fetch the previous version row for delta computation.
+            let old_ver_str = old_version.to_string();
+            #[derive(sqlx::FromRow)]
+            struct PrevRow {
+                wasm_hash: String,
+                source_url: Option<String>,
+                commit_hash: Option<String>,
+                release_notes: Option<String>,
+                state_schema: Option<serde_json::Value>,
+            }
+            let prev_row: Option<PrevRow> = sqlx::query_as(
+                "SELECT wasm_hash, source_url, commit_hash, release_notes, state_schema \
+                 FROM contract_versions \
+                 WHERE contract_id = $1 AND version = $2",
+            )
+            .bind(contract_uuid)
+            .bind(&old_ver_str)
+            .fetch_optional(&state.db)
+            .await
+            .map_err(|err| db_internal_error("fetch previous version for patch", err))?;
+
+            if let Some(pr) = prev_row {
+                let old_abi_json: serde_json::Value =
+                    serde_json::from_str(&old_abi).unwrap_or(serde_json::Value::Null);
+                prev_snapshot = Some(crate::patch_handlers::VersionSnapshot {
+                    version: old_ver_str,
+                    wasm_hash: pr.wasm_hash,
+                    source_url: pr.source_url,
+                    commit_hash: pr.commit_hash,
+                    release_notes: pr.release_notes,
+                    state_schema: pr.state_schema,
+                    abi: old_abi_json,
+                });
             }
         }
     }
@@ -2665,6 +2703,27 @@ pub async fn create_contract_version(
         .cache
         .invalidate_abi(&format!("{}@{}", contract_id, req.version))
         .await;
+
+    // Store differential patch for the new version (Issue #501).
+    let new_snapshot = crate::patch_handlers::VersionSnapshot {
+        version: req.version.clone(),
+        wasm_hash: req.wasm_hash.clone(),
+        source_url: req.source_url.clone(),
+        commit_hash: req.commit_hash.clone(),
+        release_notes: req.release_notes.clone(),
+        state_schema: None,
+        abi: req.abi.clone(),
+    };
+    if let Err(e) = crate::patch_handlers::store_patch(
+        &state.db,
+        contract_uuid,
+        prev_snapshot.as_ref(),
+        &new_snapshot,
+    )
+    .await
+    {
+        tracing::error!("Failed to store differential patch for version {}: {}", req.version, e);
+    }
 
     // Post-commit dependency analysis
     let detected_deps = dependency::detect_dependencies_from_abi(&req.abi);

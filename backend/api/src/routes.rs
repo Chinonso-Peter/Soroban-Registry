@@ -89,6 +89,23 @@ pub fn contract_routes() -> Router<AppState> {
             "/api/contracts/:id/changelog",
             get(handlers::get_contract_changelog),
         )
+        // Differential update pipeline (Issue #501)
+        .route(
+            "/api/contracts/:id/patches",
+            get(patch_handlers::list_contract_patches),
+        )
+        .route(
+            "/api/contracts/:id/patches/:from_version/:to_version",
+            get(patch_handlers::get_patch_between_versions),
+        )
+        .route(
+            "/api/contracts/:id/patches/reconstruct",
+            post(patch_handlers::reconstruct_contract_version),
+        )
+        .route(
+            "/api/contracts/patches/bulk-apply",
+            post(patch_handlers::bulk_apply_patches),
+        )
         .route(
             "/api/contracts/:id/versions/:version/source",
             get(handlers::get_contract_source).post(handlers::upload_contract_source),
@@ -295,6 +312,24 @@ pub fn publisher_routes() -> Router<AppState> {
         .route(
             "/api/publishers/:id/contracts",
             get(handlers::get_publisher_contracts),
+        )
+}
+
+pub fn contributor_routes() -> Router<AppState> {
+    Router::new()
+        .route(
+            "/api/contributors",
+            get(contributor_handlers::list_contributors)
+                .post(contributor_handlers::create_contributor),
+        )
+        .route(
+            "/api/contributors/:id",
+            get(contributor_handlers::get_contributor)
+                .put(contributor_handlers::update_contributor),
+        )
+        .route(
+            "/api/contributors/:id/contracts",
+            get(contributor_handlers::get_contributor_contracts),
         )
 }
 

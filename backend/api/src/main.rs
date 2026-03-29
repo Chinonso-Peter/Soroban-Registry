@@ -26,6 +26,7 @@ mod cache;
 mod canary_handlers;
 mod compatibility_testing_handlers;
 mod contract_events;
+mod contributor_handlers;
 mod db_monitoring;
 
 mod activity_feed_handlers;
@@ -53,6 +54,7 @@ mod onchain_verification;
 #[cfg(feature = "openapi")]
 mod openapi;
 mod org_handlers;
+mod patch_handlers;
 mod performance_handlers;
 mod rate_limit;
 mod release_notes_handlers;
@@ -258,6 +260,7 @@ async fn main() -> Result<()> {
         .merge(routes::organization_routes())
         .merge(routes::contract_routes())
         .merge(routes::publisher_routes())
+        .merge(routes::contributor_routes())
         .merge(routes::health_routes())
         .merge(routes::migration_routes())
         .merge(incident_routes::incident_routes())

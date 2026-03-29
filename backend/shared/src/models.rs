@@ -858,6 +858,75 @@ pub struct UpdateMigrationStatusRequest {
     pub log_output: Option<String>,
 }
 
+// ────────────────────────────────────────────────────────────────────────────
+// Contributor models
+// ────────────────────────────────────────────────────────────────────────────
+
+/// A contract creator profile with optional verification badge
+#[derive(Debug, Clone, Serialize, Deserialize, FromRow)]
+pub struct Contributor {
+    pub id: Uuid,
+    pub stellar_address: String,
+    pub name: Option<String>,
+    pub avatar_url: Option<String>,
+    pub bio: Option<String>,
+    pub links: serde_json::Value,
+    pub is_verified: bool,
+    pub created_at: DateTime<Utc>,
+    pub updated_at: DateTime<Utc>,
+}
+
+/// Contributor profile with aggregated contract stats
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ContributorWithStats {
+    pub id: Uuid,
+    pub stellar_address: String,
+    pub name: Option<String>,
+    pub avatar_url: Option<String>,
+    pub bio: Option<String>,
+    pub links: serde_json::Value,
+    pub is_verified: bool,
+    pub created_at: DateTime<Utc>,
+    pub updated_at: DateTime<Utc>,
+    pub contract_count: i64,
+}
+
+impl ContributorWithStats {
+    pub fn from_contributor(c: Contributor, contract_count: i64) -> Self {
+        Self {
+            id: c.id,
+            stellar_address: c.stellar_address,
+            name: c.name,
+            avatar_url: c.avatar_url,
+            bio: c.bio,
+            links: c.links,
+            is_verified: c.is_verified,
+            created_at: c.created_at,
+            updated_at: c.updated_at,
+            contract_count,
+        }
+    }
+}
+
+/// Request to create a contributor profile
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CreateContributorRequest {
+    pub stellar_address: String,
+    pub name: Option<String>,
+    pub avatar_url: Option<String>,
+    pub bio: Option<String>,
+    pub links: Option<serde_json::Value>,
+}
+
+/// Request to update a contributor profile
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct UpdateContributorRequest {
+    pub name: Option<String>,
+    pub avatar_url: Option<String>,
+    pub bio: Option<String>,
+    pub links: Option<serde_json::Value>,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, sqlx::Type, PartialEq, utoipa::ToSchema)]
 #[sqlx(type_name = "deployment_environment", rename_all = "lowercase")]
 pub enum DeploymentEnvironment {
